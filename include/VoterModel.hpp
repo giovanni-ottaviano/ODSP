@@ -1,38 +1,65 @@
-#include "BaseGraph.hpp"
-#include "RegularLattice.hpp"
+#ifndef ODSP_VOTERMODEL_HPP
+#define ODSP_VOTERMODEL_HPP
 
-//using namespace std;
+#include <cstddef>
+#include <random>
+#include <vector>
 
-// L'IDEA POTREBBE ESSERE QUELLA DI SOSTITUIRE IL REGULARLATTICE CON UN ALTRO ELEMENTO TEMOPLATE CHE POI SARà IL DIVERSO GRAFO A SECONDA DELLE EVENIENZE
-// PER ESEMPIO SI POTREBBE AVERE UN PUNTATORE AD UNA GENERICA CLASSE bASEgRAPH A POSTO DI POPULATION (COME DOVEVA ESSERE IN PRINCIPIO)
+#include "Model.hpp"
 
+// How a voter update picks who copies whom. On graphs where every node has the
+// same degree (lattices, complete graph) all three give the same dynamics up
+// to time rescaling; on graphs with heterogeneous degrees they differ, and
+// each conserves (in the mean) a different weighted magnetization, which then
+// equals 2 P(+1 consensus) - 1:
+//
+//   Node    : random node i copies a random neighbour.   conserves sum k_i s_i / sum k_i
+//             (the classic voter model)                   (get_degree_weighted_magnetization)
+//   Link    : random edge, a random endpoint copies the   conserves sum s_i / N  (plain m)
+//             other (= uniform random directed edge).
+//   Reverse : random node i imposes its opinion on a      conserves sum (s_i/k_i) / sum (1/k_i)
+//             random neighbour (invasion process).
+enum class VoterUpdate { Node, Link, Reverse };
+
+// Voter model: an opinion is copied across one random edge per update.
 template <typename T>
-class VoterModel {
+class VoterModel : public Model<T> {
+public:
+    VoterModel(std::unique_ptr<BaseGraph<T>> graph, std::mt19937* rng,
+               VoterUpdate update = VoterUpdate::Node, bool track_active_links = true)
+        : Model<T>(std::move(graph), rng, track_active_links), _update(update) {}
 
-    public:
-        VoterModel(const RegularLattice<T>&, std::mt19937*);
-        VoterModel(RegularLattice<T>&&, std::mt19937*);
-        //VoterModel(); // per ora non metto anche una versione in cui il reticolo viene riempito dal modello, lo faccio fare da funzioni a parte da mettere in delle utils
+    VoterModel(std::unique_ptr<BaseGraph<T>> graph, std::mt19937* rng, bool track_active_links)
+        : VoterModel(std::move(graph), rng, VoterUpdate::Node, track_active_links) {}
 
+    VoterUpdate update_scheme() const { return _update; }
 
-        RegularLattice<T>& get_lattice() const; // il const potrebbe essere problematico
-        double get_magnetization() const;
-        double get_magnetization_per_site() const;
-        int get_mc_steps() const;
-        int get_spin_flips() const;
-        bool is_consensus_reached() const;
+protected:
+    void _single_update() override {
+        switch (_update) {
+        case VoterUpdate::Node: {
+            const std::size_t node = this->random_node();
+            if (this->graph().degree(node) == 0) return;
+            this->_apply(node, this->graph().get_state(this->random_neighbour(node)));
+            return;
+        }
+        case VoterUpdate::Link: {
+            if (this->get_edge_count() == 0) return;
+            const auto [node, source] = this->random_directed_edge();
+            this->_apply(node, this->graph().get_state(source));
+            return;
+        }
+        case VoterUpdate::Reverse: {
+            const std::size_t source = this->random_node();
+            if (this->graph().degree(source) == 0) return;
+            this->_apply(this->random_neighbour(source), this->graph().get_state(source));
+            return;
+        }
+        }
+    }
 
-        void set_rng(std::mt19937*);
-
-        void run_montecarlo(int, int, bool);
-        
-    private:
-        void _compute_magnetization();
-        void _single_spin_flip();
-        void _mc_step();
-
-        RegularLattice<T> _population;
-        double _magnetization;
-        int _executed_mc_steps, _executed_spin_flips; // POTREBBERO ESSERE TROPPO PICCOLI (ALMENO IL SECONDO)
-        std::mt19937 *_rng;
+private:
+    VoterUpdate _update;
 };
+
+#endif // ODSP_VOTERMODEL_HPP

@@ -119,6 +119,8 @@ inline const std::vector<OptionDoc>& task_options() {
         {"blocks", "n", "20", "stationary: jackknife blocks for the error bars"},
         {"bins", "n", "50", "stationary: bins of the histogram of the sampled observable"},
         {"threshold", "x", "", "ensemble: also record when the largest opinion share first reaches x (discrete)"},
+        {"tw", "t1,t2,...", "", "run/ensemble: waiting times of the autocorrelation/overlap observables (added to the recording times)"},
+        {"correlation", "true|false", "false", "write the spatial correlation G(r) to prefix_correlation.csv (lattices; ensembles need a time series)"},
         {"sweep", "key=v1,v2,... | key=start:stop:step", "", "repeat the ensemble or stationary task for each value of a parameter"},
     };
 
@@ -156,6 +158,9 @@ inline const std::vector<OptionDoc>& observable_docs() {
         {"clusters", "", "", "opinion clusters with >= 1% of the nodes (continuous)"},
         {"largest_cluster", "", "", "share of the largest opinion cluster (continuous)"},
         {"sweeps", "", "", "sweeps done (e.g. as an ensemble's final observable)"},
+        {"length", "", "", "coarsening length: where the spatial correlation G(r) drops to 1/2 (lattices)"},
+        {"autocorrelation", "", "", "two-time C(t, t_w): (1/N) sum s_i(t) s_i(t_w) for +/-1, Pearson for continuous; one column per --tw (time series)"},
+        {"overlap", "", "", "fraction of nodes with the same opinion as at t_w; one column per --tw (time series, discrete)"},
         {"persistence", "", "", "fraction of nodes that never changed opinion"},
         {"activity", "", "", "fraction of attempted updates that changed an opinion (per recording interval; whole run as a final value)"},
         {"entropy", "", "", "Shannon entropy of the opinion shares (discrete)"},
@@ -192,9 +197,10 @@ inline std::string suggestion(const std::string& word, const std::vector<std::st
     return best;
 }
 
-inline void print_options(const std::vector<OptionDoc>& docs, const std::string& indent = "  ") {
+// as_options: print names as "--name" (options) or bare (observables).
+inline void print_options(const std::vector<OptionDoc>& docs, const std::string& indent = "  ", bool as_options = true) {
     for (const auto& d : docs) {
-        std::string flag = "--" + d.name + (d.value.empty() ? "" : " " + d.value);
+        std::string flag = (as_options ? "--" : "") + d.name + (d.value.empty() ? "" : " " + d.value);
         std::cout << indent << flag;
         if (flag.size() < 34)
             std::cout << std::string(34 - flag.size(), ' ');
@@ -249,7 +255,7 @@ inline void print_help(const std::string& topic) {
     }
     else if (topic == "observables") {
         std::cout << "Observables (--observables a,b,... or --observable name):\n";
-        print_options(observable_docs());
+        print_options(observable_docs(), "  ", /*as_options=*/false);
     }
     else {
         std::cout <<

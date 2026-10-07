@@ -111,9 +111,18 @@ Plan<T> read_plan(Options& o, TopologyCache* cache = nullptr) {
     p.params = read_task(o, p.task, p.setup.model, p.setup.init);
 
     // Fail now rather than after a long run: observables must exist for this
-    // model, and the model must accept its parameters.
-    for (const auto& name : p.params.observables) make_observable<T>(name, p.setup.model);
-    if (p.task == "stationary") make_observable<T>(p.params.observable, p.setup.model);
+    // model and graph, and the model must accept its parameters. In `run` and
+    // in ensemble time series, observables may follow the trajectory.
+    ObservableContext& ctx = p.setup.context;
+    ctx.sweeps = p.task != "ensemble" || p.params.sweeps_unit;
+    const bool series = p.task == "run" || (p.task == "ensemble" && !p.params.times.empty());
+    for (const auto& name : p.params.observables) make_observable<T>(name, p.setup.model, series, ctx);
+    if (p.task == "stationary") {
+        if (is_two_time(p.params.observable))
+            throw OptionError("the stationary task samples one observable at a time; two-time observables are for run/ensemble");
+        make_observable<T>(p.params.observable, p.setup.model, true, ctx);
+    }
+    if (p.params.correlation && !ctx.lattice) throw OptionError("--correlation needs a lattice (--graph lattice)");
     std::mt19937 scratch(0);
     try {
         p.setup.factory(scratch);

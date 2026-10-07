@@ -21,6 +21,7 @@
 #include "EdgeListIO.hpp"
 #include "Generators.hpp"
 #include "RegularLattice.hpp"
+#include "Correlations.hpp"
 #include "Ensemble.hpp"
 #include "OpinionClusters.hpp"
 #include "Utils.hpp"
@@ -573,11 +574,38 @@ inline std::vector<std::string> default_observables(const ModelSpec& m, const In
     return task == "stationary" ? std::vector<std::string>{"m"} : std::vector<std::string>{"m", "rho"};
 }
 
-// per_interval: for "activity", measure since the previous evaluation of this
-// observable (time series) instead of since the start (final values). The
-// returned function then carries state, so use one per trajectory.
+// What an observable may rely on: the lattice geometry, the opinion type and
+// the time unit of the run.
+struct ObservableContext {
+    bool lattice = false;          // a RegularLattice
+    bool periodic_cubic = false;   // periodic boundaries and equal sides (structure factor)
+    int  side = 0;                 // side length when periodic_cubic
+    bool binary = false;           // opinions are +/-1
+    bool sweeps = true;            // times count sweeps (else single updates)
+    std::vector<int> alphabet;     // the model's opinion labels (discrete; empty if unbounded)
+};
+
+// "autocorrelation_tw100" -> 100; -1 if the name has no _tw suffix.
+inline long long tw_of(const std::string& name) {
+    const std::size_t at = name.rfind("_tw");
+    if (at == std::string::npos)
+        return -1;
+    try {
+        std::size_t used = 0;
+        const long long tw = std::stoll(name.substr(at + 3), &used);
+        return used == name.size() - at - 3 && tw >= 0 ? tw : -1;
+    } catch (const std::exception&) {
+        return -1;
+    }
+}
+
+// per_interval: the observable follows one trajectory in time (a time series),
+// so it may carry state -- "activity" is then measured since its previous
+// evaluation, and the two-time "autocorrelation_tw<t>" / "overlap_tw<t>" take
+// their snapshot at t. Use one such function per trajectory.
 template <typename T>
-Observable<T> make_observable(const std::string& name, const ModelSpec& m, bool per_interval = false) {
+Observable<T> make_observable(const std::string& name, const ModelSpec& m, bool per_interval = false,
+                              const ObservableContext& ctx = ObservableContext()) {
     const bool continuous = is_continuous(m.name);
     auto need = [&](bool ok, const std::string& what) {
         if (!ok)
@@ -599,6 +627,42 @@ Observable<T> make_observable(const std::string& name, const ModelSpec& m, bool 
     }
     if (name == "persistence")
         return [](const Model<T>& x) { return x.persistence(); };
+    if (name == "length") {
+        need(ctx.lattice, "needs a lattice (--graph lattice)");
+        return [](const Model<T>& x) {
+            return corr::coarsening_length(corr::spatial_correlation(static_cast<const RegularLattice<T>&>(x.get_graph())));
+        };
+    }
+    if (name == "autocorrelation" || name == "overlap")
+        need(false, "needs waiting times: --tw t1,t2,...");
+    const long long tw = tw_of(name);
+    const std::string base = tw < 0 ? name : name.substr(0, name.rfind("_tw"));
+    if (tw >= 0 && (base == "autocorrelation" || base == "overlap")) {
+        need(per_interval, "follows a trajectory: use it in a time series (--every or --log-times)");
+        if (base == "autocorrelation")
+            need(continuous || ctx.binary, "needs +/-1 or continuous opinions; use overlap for other opinions");
+        else
+            need(!continuous, "is for discrete opinions; use autocorrelation for continuous ones");
+        struct Snapshot {
+            bool taken = false;
+            std::vector<T> states;
+        };
+        auto snap = std::make_shared<Snapshot>();
+        const bool sweeps = ctx.sweeps, is_overlap = base == "overlap";
+        return [snap, tw, sweeps, is_overlap](const Model<T>& x) {
+            const long long now = sweeps ? x.get_mc_steps() : x.get_updates();
+            if (now < tw)
+                return std::nan("");
+            // Taken at t_w (always a recording time); a run that stopped before
+            // t_w is frozen, so its final state is its state at t_w.
+            if (!snap->taken) {
+                snap->states = x.get_graph().states();
+                snap->taken = true;
+            }
+            return is_overlap ? corr::overlap(x.get_graph().states(), snap->states)
+                              : corr::autocorrelation(x.get_graph().states(), snap->states);
+        };
+    }
     if (name == "variance")
         return [](const Model<T>& x) { return x.opinion_variance(); };
     if (name == "bimodality")
@@ -670,7 +734,24 @@ struct Setup {
     bool         regenerate = false;
     typename Ensemble<T>::ModelFactory factory;
     std::string  description;
+    ObservableContext context;   // for make_observable (each task sets the time unit)
 };
+
+// The opinions a start can produce (empty when unbounded: distinct, uniform).
+inline std::vector<double> init_values(const InitSpec& init) {
+    std::vector<double> v;
+    if (init.kind == "random")
+        v = {1.0, -1.0};
+    if (init.kind == "all")
+        v = {init.value};
+    if (init.kind == "balanced")
+        for (int k = 0; k < init.opinions; ++k)
+            v.push_back(k);
+    if (init.kind == "fractions")
+        for (std::size_t k = 0; k < init.fractions.size(); ++k)
+            v.push_back(static_cast<double>(k));
+    return v;
+}
 
 // graph_seed fixes the shared random network, so it is the same in every
 // task and at every point of a sweep
@@ -705,6 +786,36 @@ Setup<T> read_setup(Options& o, unsigned graph_seed, TopologyCache* cache = null
     };
     s.description = s.model.description + " on " + s.topology->description + (s.regenerate ? " (new network per replica)" : "") +
                     "; start: " + s.init.description;
+
+    // Observable context: geometry, and the opinion labels of the model.
+    ObservableContext& c = s.context;
+    c.lattice = s.topology->lattice;
+    const std::vector<int>& dims = s.topology->dims;
+    if (c.lattice && s.topology->boundary == Boundary::Periodic &&
+        std::adjacent_find(dims.begin(), dims.end(), std::not_equal_to<int>()) == dims.end()) {
+        c.periodic_cubic = true;
+        c.side = dims.front();
+    }
+    if (!is_continuous(s.model.name)) {
+        const OpinionSet set = opinion_set(s.model);
+        std::vector<double> labels;
+        if (set.kind == OpinionSet::Binary)
+            labels = {-1.0, 1.0};
+        else if (set.kind == OpinionSet::Range)
+            for (int k = 0; k < set.q; ++k)
+                labels.push_back(k);
+        else if (s.init.kind != "distinct") {
+            labels = init_values(s.init);
+            for (const auto& z : s.init.zealots)
+                labels.push_back(z.second);
+        }
+        std::sort(labels.begin(), labels.end());
+        labels.erase(std::unique(labels.begin(), labels.end()), labels.end());
+        for (double v : labels)
+            c.alphabet.push_back(static_cast<int>(v));
+        c.binary = !c.alphabet.empty() &&
+                   std::all_of(c.alphabet.begin(), c.alphabet.end(), [](int v) { return v == 1 || v == -1; });
+    }
     return s;
 }
 

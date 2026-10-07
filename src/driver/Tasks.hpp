@@ -45,7 +45,43 @@ struct TaskParams {
     int         chains = 1;                 // stationary: independent chains (--replicas)
     double      threshold = std::nan("");   // ensemble: largest-share threshold (NaN = none)
     std::vector<long long> times;           // recording times (run; ensemble time series if non-empty)
+    bool        correlation = false;        // write G(r) curves (--correlation)
 };
+
+// Observables measured against a snapshot at waiting time t_w ("_tw<t>").
+inline bool is_two_time(const std::string& name) { return tw_of(name) >= 0; }
+
+// Expands "autocorrelation" / "overlap" into one observable per --tw value and
+// adds the waiting times to the recording grid (so the snapshots are taken
+// exactly at t_w). Only reads --tw when such an observable was asked for.
+inline void expand_two_time(Options& o, TaskParams& t) {
+    bool wanted = false;
+    for (const auto& n : t.observables) wanted |= n == "autocorrelation" || n == "overlap";
+    if (!wanted) return;
+    if (!o.has("tw")) throw OptionError("observables autocorrelation/overlap need waiting times: --tw t1,t2,...");
+    std::vector<long long> tws;
+    for (const std::string& v : o.word_list("tw", "")) {
+        try {
+            std::size_t used = 0;
+            const long long tw = std::stoll(v, &used);
+            if (used != v.size() || tw < 0 || tw > t.steps) throw std::out_of_range(v);
+            tws.push_back(tw);
+        } catch (const std::exception&) {
+            throw OptionError("option --tw: expected waiting times in 0.." + std::to_string(t.steps) + ", got '" + v + "'");
+        }
+    }
+    std::vector<std::string> expanded;
+    for (const auto& n : t.observables) {
+        if (n != "autocorrelation" && n != "overlap") { expanded.push_back(n); continue; }
+        for (long long tw : tws) expanded.push_back(n + "_tw" + std::to_string(tw));
+    }
+    t.observables = expanded;
+    if (!t.times.empty()) {
+        for (long long tw : tws) t.times.push_back(tw);   // (a range insert trips a GCC 13 false-positive warning)
+        std::sort(t.times.begin(), t.times.end());
+        t.times.erase(std::unique(t.times.begin(), t.times.end()), t.times.end());
+    }
+}
 
 // Times at which to record, from 0 to steps (both included), strictly
 // increasing: every `every` steps, or -- when per_decade > 0 -- log-spaced with
@@ -104,6 +140,8 @@ inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec
         std::string joined;
         for (const auto& n : d) joined += (joined.empty() ? "" : ",") + n;
         t.observables = o.word_list("observables", joined);
+        expand_two_time(o, t);
+        t.correlation = o.flag("correlation", false);
     } else if (task == "ensemble") {
         t.replicas = static_cast<int>(positive("replicas", 100));
         t.sweeps_unit = o.choice("time-unit", "sweeps", {"sweeps", "updates"}) == "sweeps";
@@ -118,6 +156,13 @@ inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec
         std::string joined;
         for (const auto& n : d) joined += (joined.empty() ? "" : ",") + n;
         t.observables = o.word_list("observables", joined);
+        expand_two_time(o, t);
+        t.correlation = o.flag("correlation", false);
+        for (const auto& n : t.observables)
+            if (is_two_time(n) && t.times.empty())
+                throw OptionError("observable " + n + " needs an ensemble time series: add --every or --log-times");
+        if (t.correlation && t.times.empty())
+            throw OptionError("--correlation in an ensemble needs a time series: add --every or --log-times");
     } else {   // stationary
         t.observable = o.str("observable", default_observables(m, init, task).front());
         t.burn_in = o.integer("burn-in", 1000);
@@ -127,6 +172,7 @@ inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec
         t.blocks = static_cast<int>(positive("blocks", 20));
         t.bins = static_cast<int>(positive("bins", 50));
         t.chains = static_cast<int>(positive("replicas", 1));
+        t.correlation = o.flag("correlation", false);
     }
     return t;
 }
@@ -148,11 +194,14 @@ void task_run(const TaskParams& t, const Setup<T>& s, unsigned seed, const std::
     std::mt19937 rng(seed);
     auto model = s.factory(rng);
     std::vector<Observable<T>> obs;
-    for (const auto& name : t.observables) obs.push_back(make_observable<T>(name, s.model, /*per_interval=*/true));
+    for (const auto& name : t.observables)
+        obs.push_back(make_observable<T>(name, s.model, /*per_interval=*/true, s.context));
 
     std::vector<std::string> header = {"sweep"};
     header.insert(header.end(), t.observables.begin(), t.observables.end());
     CsvWriter csv(path_for(prefix, "timeseries"), header);
+    // G(r) at every recording time, long format: sweep, r, G.
+    CsvWriter curves(t.correlation ? path_for(prefix, "correlation") : std::string(), {"sweep", "r", "G"});
 
     std::vector<int> widths;   // each column at least as wide as its name
     for (const auto& n : t.observables) widths.push_back(static_cast<int>(std::max<std::size_t>(14, n.size() + 2)));
@@ -164,6 +213,10 @@ void task_run(const TaskParams& t, const Setup<T>& s, unsigned seed, const std::
         std::vector<double> values;
         for (const auto& f : obs) values.push_back(f(*model));
         csv.row_values(std::to_string(sweep), values);
+        if (t.correlation) {
+            const auto G = corr::spatial_correlation(static_cast<const RegularLattice<T>&>(model->get_graph()));
+            for (std::size_t r = 0; r < G.size(); ++r) curves.row(sweep, r, G[r]);
+        }
         if (sweep == 0 || sweep >= next_print || force_print) {   // print on a log scale
             std::cout << std::setw(10) << sweep;
             for (std::size_t k = 0; k < values.size(); ++k) std::cout << std::setw(widths[k]) << fmt(values[k]);
@@ -198,8 +251,15 @@ void task_run(const TaskParams& t, const Setup<T>& s, unsigned seed, const std::
 template <typename T>
 Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int threads, const std::string& prefix,
                   bool verbose) {
+    ObservableContext ctx = s.context;
+    ctx.sweeps = t.sweeps_unit;
+    // Final values: every observable except the two-time ones, which follow a
+    // trajectory (their last value is in the time series).
+    std::vector<std::string> final_names;
+    for (const auto& name : t.observables)
+        if (!is_two_time(name)) final_names.push_back(name);
     std::vector<typename Ensemble<T>::FinalObservable> obs;
-    for (const auto& name : t.observables) obs.push_back(make_observable<T>(name, s.model));
+    for (const auto& name : final_names) obs.push_back(make_observable<T>(name, s.model, false, ctx));
     // Hidden last observable: did the replica end absorbed (consensus, or
     // convergence for continuous models) rather than at the step cap?
     obs.push_back([](const Model<T>& m) { return m.is_absorbing_state() ? 1.0 : 0.0; });
@@ -226,12 +286,17 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
     auto slot = [&series_values, K, O](std::size_t r, std::size_t k, std::size_t o) -> double& {
         return series_values[(r * K + k) * O + o];
     };
+    // G(r) per replica and recording time, when --correlation is given.
+    std::vector<std::vector<double>> curves(t.correlation ? R * K : 0);
+    auto curve_of = [](const Model<T>& m) {
+        return corr::spatial_correlation(static_cast<const RegularLattice<T>&>(m.get_graph()));
+    };
 
     if (use_threshold || series) {
         hooks.step = [&, x, sweeps, use_threshold, series](int replica) {
             const std::size_t r = static_cast<std::size_t>(replica);
             if (series)
-                for (const auto& name : t.observables) replica_obs[r].push_back(make_observable<T>(name, s.model, true));
+                for (const auto& name : t.observables) replica_obs[r].push_back(make_observable<T>(name, s.model, true, ctx));
             return typename Model<T>::Observer([&, r, x, sweeps, use_threshold, series](const Model<T>& m) {
                 const long long now = sweeps ? m.get_mc_steps() : m.get_updates();
                 if constexpr (std::is_integral<T>::value)
@@ -239,6 +304,7 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
                         threshold_times[r] = now;
                 if (series && recorded[r] < K && grid[recorded[r]] == now) {
                     for (std::size_t o = 0; o < O; ++o) slot(r, recorded[r], o) = replica_obs[r][o](m);
+                    if (t.correlation) curves[r * K + recorded[r]] = curve_of(m);
                     ++recorded[r];
                 }
             });
@@ -250,8 +316,10 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
     if (series || keep_clusters)
         hooks.finish = [&, series, keep_clusters](int replica, const Model<T>& m) {
             const std::size_t r = static_cast<std::size_t>(replica);
-            for (; series && recorded[r] < K; ++recorded[r])
+            for (; series && recorded[r] < K; ++recorded[r]) {
                 for (std::size_t o = 0; o < O; ++o) slot(r, recorded[r], o) = replica_obs[r][o](m);
+                if (t.correlation) curves[r * K + recorded[r]] = curve_of(m);
+            }
             if (keep_clusters) {
                 const auto& xs = m.get_graph().states();
                 clusters[r] = opinion_clusters(std::vector<double>(xs.begin(), xs.end()), 1e-3);
@@ -288,14 +356,14 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
         for (double v : r.final_observables[k]) { sum += v; sum2 += v * v; }
         means.push_back(sum / r.replicas);
         sds.push_back(std::sqrt(std::max(0.0, sum2 / r.replicas - means[k] * means[k])));
-        row.push_back({"mean_" + t.observables[k], means[k]});
-        row.push_back({"sd_" + t.observables[k], sds[k]});
+        row.push_back({"mean_" + final_names[k], means[k]});
+        row.push_back({"sd_" + final_names[k], sds[k]});
     }
 
     if (!prefix.empty()) {
         std::vector<std::string> header = {"replica", "reached_consensus", "absorbed", "stop_time"};
         if (use_threshold) header.push_back("threshold_time");
-        header.insert(header.end(), t.observables.begin(), t.observables.end());
+        header.insert(header.end(), final_names.begin(), final_names.end());
         CsvWriter rep(path_for(prefix, "replicas"), header);
         for (int i = 0; i < r.replicas; ++i) {
             std::vector<double> values = {static_cast<double>(r.reached[i]), absorbed_flags[i], static_cast<double>(r.stop_times[i])};
@@ -380,6 +448,23 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
         }
     }
 
+    // ---- G(r) curves: mean and standard error over replicas at each time ----
+    if (t.correlation && !prefix.empty()) {
+        CsvWriter out(path_for(prefix, "correlation"), {"time", "r", "G_mean", "G_err"});
+        for (std::size_t k = 0; k < K; ++k) {
+            const std::size_t len = curves[k].size();   // replica 0's curve fixes the length
+            for (std::size_t d = 0; d < len; ++d) {
+                double sum = 0.0, sum2 = 0.0;
+                for (std::size_t i = 0; i < R; ++i) {
+                    const double g = curves[i * K + k][d];
+                    sum += g; sum2 += g * g;
+                }
+                const double mean = sum / R, sd = std::sqrt(std::max(0.0, sum2 / R - mean * mean));
+                out.row(grid[k], d, mean, sd / std::sqrt(static_cast<double>(R)));
+            }
+        }
+    }
+
     if (verbose) {
         std::cout << "Replicas: " << r.replicas << ", each run for " << (r.first_passage ? "" : "at most ")
                   << t.steps << " " << unit << ".\n";
@@ -418,8 +503,8 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
         if (!obs.empty()) {
             std::cout << "Final values (mean +- standard error, sd):\n";
             for (std::size_t k = 0; k < obs.size(); ++k)
-                std::cout << "  " << std::left << std::setw(static_cast<int>(std::max<std::size_t>(16, t.observables[k].size() + 2)))
-                          << t.observables[k] << std::right << fmt(means[k]) << " +- "
+                std::cout << "  " << std::left << std::setw(static_cast<int>(std::max<std::size_t>(16, final_names[k].size() + 2)))
+                          << final_names[k] << std::right << fmt(means[k]) << " +- "
                           << fmt(sds[k] / std::sqrt(static_cast<double>(r.replicas)), 3) << "   (sd " << fmt(sds[k], 4) << ")\n";
         }
         if (!prefix.empty())
@@ -443,9 +528,14 @@ Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const
     for (int c = 1; c < R; ++c) seeds[static_cast<std::size_t>(c)] = seeder();
 
     const bool thermal = s.model.name == "ising" || s.model.name == "potts";   // energy -> specific heat
+    // Second-moment correlation length: periodic hypercubic lattice, discrete
+    // opinions with a fixed set of at least two labels.
+    const ObservableContext& ctx = s.context;
+    const bool want_xi = std::is_integral<T>::value && ctx.periodic_cubic && ctx.alphabet.size() >= 2;
     struct Chain {
         typename Model<T>::StationarySample st;
-        std::vector<double> energy;
+        std::vector<double> energy, s0, s_min;    // per sample
+        std::vector<std::vector<double>> curves;  // G(r) per sample (--correlation)
     };
     std::vector<Chain> chains(static_cast<std::size_t>(R));
     double N = 0.0;
@@ -458,23 +548,36 @@ Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const
             N = static_cast<double>(model->get_graph().size());
             absorbing = model->consensus_is_absorbing();
         }
-        const Observable<T> base = make_observable<T>(t.observable, s.model, /*per_interval=*/true);
+        const Observable<T> base = make_observable<T>(t.observable, s.model, /*per_interval=*/true, ctx);
         Observable<T> energy_of;
         if constexpr (std::is_integral<T>::value)
             if (thermal) energy_of = make_observable<T>("energy", s.model);
-        const Observable<T> obs = !thermal ? base : Observable<T>([&ch, &energy_of, &base](const Model<T>& m) {
-            ch.energy.push_back(energy_of(m));
+        const std::vector<T> labels(ctx.alphabet.begin(), ctx.alphabet.end());
+        // Side series sampled with the main observable.
+        const Observable<T> obs = [&, labels](const Model<T>& m) {
+            if (thermal) ch.energy.push_back(energy_of(m));
+            if (want_xi || t.correlation) {
+                const auto& lattice = static_cast<const RegularLattice<T>&>(m.get_graph());
+                if (want_xi) {
+                    const corr::StructureFactor sf = corr::structure_factor(lattice, labels);
+                    ch.s0.push_back(sf.s0);
+                    ch.s_min.push_back(sf.s_min);
+                }
+                if (t.correlation) ch.curves.push_back(corr::spatial_correlation(lattice));
+            }
             return base(m);
-        });
+        };
         ch.st = model->sample_stationary(obs, t.burn_in, t.samples, t.interval, true, t.blocks);
     });
 
     // Pooled samples, chain after chain (equal lengths), so a jackknife with
     // one block per chain is leave-one-chain-out.
-    std::vector<double> pooled, energy;
+    std::vector<double> pooled, energy, s0, s_min;
     for (const Chain& ch : chains) {
         pooled.insert(pooled.end(), ch.st.m.begin(), ch.st.m.end());
         energy.insert(energy.end(), ch.energy.begin(), ch.energy.end());
+        s0.insert(s0.end(), ch.s0.begin(), ch.s0.end());
+        s_min.insert(s_min.end(), ch.s_min.begin(), ch.s_min.end());
     }
     using Estimator = std::function<double(const stats::Moments&)>;
     const double T2 = s.model.temperature * s.model.temperature;
@@ -542,6 +645,45 @@ Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const
                                {"specific_heat_err", heat_err}, {"specific_heat_err_within", heat_within}});
     }
 
+    // Second-moment correlation length from the averaged structure factors
+    // (a ratio of averages, so its error needs the two-series jackknife).
+    double xi = std::nan(""), xi_err = std::nan("");
+    if (want_xi && !s0.empty()) {
+        const int L = ctx.side;
+        auto xi_of = [L](double a, double b) { return corr::second_moment_length(a, b, L); };
+        const stats::Moments m0 = stats::moments(s0), m1 = stats::moments(s_min);
+        xi = xi_of(m0.m1, m1.m1);
+        xi_err = R == 1 ? stats::jackknife_error2(s0, s_min, t.blocks, xi_of) : stats::jackknife_error2(s0, s_min, R, xi_of);
+        row.insert(row.end(), {{"xi", xi}, {"xi_err", xi_err}, {"xi_over_L", xi / L}, {"xi_over_L_err", xi_err / L}});
+    }
+
+    // G(r) averaged over all samples; error from block means (one block per
+    // chain with several chains, else --blocks blocks of the single chain).
+    if (t.correlation && !prefix.empty() && !chains.empty() && !chains[0].curves.empty()) {
+        const std::size_t len = chains[0].curves[0].size();
+        std::vector<std::vector<double>> block_means;
+        for (const Chain& ch : chains) {
+            const std::size_t nb = R > 1 ? 1 : static_cast<std::size_t>(std::max(1, t.blocks));
+            const std::size_t per = std::max<std::size_t>(1, ch.curves.size() / nb);
+            for (std::size_t b = 0; b < nb && b * per < ch.curves.size(); ++b) {
+                std::vector<double> mean(len, 0.0);
+                const std::size_t end = std::min(ch.curves.size(), (b + 1) * per);
+                for (std::size_t i = b * per; i < end; ++i)
+                    for (std::size_t d = 0; d < len; ++d) mean[d] += ch.curves[i][d];
+                for (double& v : mean) v /= static_cast<double>(end - b * per);   // sum first: exact for constant G
+                block_means.push_back(mean);
+            }
+        }
+        CsvWriter out(path_for(prefix, "correlation"), {"r", "G_mean", "G_err"});
+        const double B = static_cast<double>(block_means.size());
+        for (std::size_t d = 0; d < len; ++d) {
+            double sum = 0.0, sum2 = 0.0;
+            for (const auto& bm : block_means) { sum += bm[d]; sum2 += bm[d] * bm[d]; }
+            const double mean = sum / B, sd = std::sqrt(std::max(0.0, sum2 / B - mean * mean));
+            out.row(d, mean, B > 1 ? sd / std::sqrt(B - 1.0) : 0.0);
+        }
+    }
+
     // Histogram of the pooled samples over their range.
     const auto [lo_it, hi_it] = std::minmax_element(pooled.begin(), pooled.end());
     const double lo = pooled.empty() ? 0.0 : *lo_it, hi = pooled.empty() ? 0.0 : *hi_it;
@@ -577,6 +719,9 @@ Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const
         if (thermal && !energy.empty())
             std::cout << "  energy per site     " << fmt(e_mean) << " +- " << fmt(e_err, 3) << '\n'
                       << "  specific heat       " << fmt(heat) << " +- " << fmt(heat_err, 3) << "   (N var(e) / T^2)\n";
+        if (want_xi)
+            std::cout << "  correlation length  " << fmt(xi) << " +- " << fmt(xi_err, 3) << "   (second moment; xi/L = "
+                      << fmt(xi / ctx.side, 4) << ")\n";
         // A compact text histogram (at most 12 rows) to see one peak or two.
         const std::size_t rows = std::min<std::size_t>(12, hist.size());
         if (rows > 1 && width > 0.0) {

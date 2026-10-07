@@ -152,6 +152,30 @@ inline std::vector<std::size_t> histogram(const std::vector<double>& x, int bins
     return counts;
 }
 
+// Block-jackknife error of f(<x>, <y>), a function of the means of two series
+// sampled together (e.g. a ratio of averages, as in the second-moment
+// correlation length). Same blocks as jackknife_error; 0 if too few samples.
+template <typename F>
+double jackknife_error2(const std::vector<double>& x, const std::vector<double>& y, int blocks, F f) {
+    if (blocks < 2 || x.size() != y.size() || x.size() < 2 * static_cast<std::size_t>(blocks)) return 0.0;
+    const std::size_t B = static_cast<std::size_t>(blocks), len = x.size() / B, used = len * B;
+    std::vector<double> bx(B, 0.0), by(B, 0.0);
+    double tx = 0.0, ty = 0.0;
+    for (std::size_t b = 0; b < B; ++b) {
+        for (std::size_t i = b * len; i < (b + 1) * len; ++i) { bx[b] += x[i]; by[b] += y[i]; }
+        tx += bx[b]; ty += by[b];
+    }
+    const double inv = 1.0 / static_cast<double>(used - len);
+    std::vector<double> theta(B);
+    for (std::size_t b = 0; b < B; ++b) theta[b] = f((tx - bx[b]) * inv, (ty - by[b]) * inv);
+    double mean = 0.0;
+    for (double t : theta) mean += t;
+    mean /= static_cast<double>(B);
+    double var = 0.0;
+    for (double t : theta) var += (t - mean) * (t - mean);
+    return std::sqrt(var * static_cast<double>(B - 1) / static_cast<double>(B));
+}
+
 } // namespace stats
 
 #endif // ODSP_STATISTICS_HPP

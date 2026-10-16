@@ -35,6 +35,7 @@ include/                    the library (header-only)
   OpinionClusters.hpp         clusters of continuous opinions (number, sizes, positions)
   SznajdModel.hpp             Sznajd outflow dynamics
   Ensemble.hpp                many independent replicas (multi-threaded) -> ensemble statistics
+  Parallel.hpp                parallel loops on a shared thread pool; nested loops borrow idle threads
   Statistics.hpp              jackknife errors, integrated autocorrelation time
   Utils.hpp                   initial conditions: random +/-1, q opinions in given shares, distinct
                               opinions, uniform continuous opinions
@@ -42,6 +43,7 @@ include/                    the library (header-only)
 src/odsp.cpp, src/driver/    the command-line driver (bin/odsp)
 src/*_demo.cpp              demo programs
 tests/                      test suite (self-contained, no external dependency)
+benchmarks/                 reproduction of published results at research scale (see Benchmarks)
 ```
 
 ## Header-only design
@@ -113,11 +115,13 @@ odsp --model deffuant --epsilon 0.2 --graph complete --n 1000 --task ensemble --
   active, the fraction of runs still active, and the survival probability S(t)
   (fraction not yet in consensus; first passage for models that can leave it).
   `--sweep key=v1,v2,...` or `key=start:stop:step` repeats `ensemble` or
-  `stationary` for each value of any option and writes one table. Sweep points
-  run in parallel within `--threads`, and `stationary --replicas R` runs R
-  independent chains in parallel, pooling their samples (errors from the spread
-  between chains, with a warning when chains disagree beyond their own errors).
-  Results never depend on the number of threads.
+  `stationary` for each value of any option and writes one table.
+  `stationary --replicas R` runs R independent chains in parallel, pooling
+  their samples (errors from the spread between chains, with a warning when
+  chains disagree beyond their own errors). Sweep points and their replicas or
+  chains share one pool of `--threads` threads, so threads freed by finished
+  points help the ones still running. Results never depend on the number of
+  threads.
 - **Everything is an option**: model and its parameters, graph (`lattice`,
   `complete`, `gnp`, `gnm`, `regular`, `ws`, `ba`, `star`, `file`), initial
   condition, zealots, observables. `odsp --help models | graphs | tasks | init |
@@ -372,6 +376,53 @@ statistics helpers) and statistical tests against exact results:
   frozen on sparse graphs; ~1/(2ε) clusters.
 
 Statistical tests use fixed seeds and tolerances of about 4 standard errors.
+
+## Benchmarks
+
+`benchmarks/` reproduces published results at research-scale sizes, beyond
+what the test suite can afford. It takes about an hour at 10 threads.
+
+```
+benchmarks/run_benchmarks.sh               # all jobs, at most 10 threads (THREADS=n to change)
+benchmarks/run_benchmarks.sh 'ising|potts' # only the jobs whose name matches
+python3 benchmarks/analyse.py              # compare with the known values: PASS/FAIL per check
+```
+
+Jobs run one at a time with fixed seeds. Results, the driver's output and wall
+times go to `benchmarks/results/` (not tracked by git). `analyse.py` needs
+only the Python standard library, skips benchmarks that have no results, and
+exits with status 1 if a check fails. Exact results must agree within 3
+standard errors; asymptotic ones also allow for the finite-size corrections
+expected at these sizes.
+
+What is checked:
+
+- **Voter consensus time.**
+  - Complete graph: the mean and sd against the exact birth–death chain.
+  - Random 4-regular graph: T/N → ln2·(k−1)/(k−2).
+  - 2D torus: T/(N ln N) → ln2/π.
+  - 3D torus: T/N → ln2/(1 − P_return).
+  - Plain and rejection-free voter agree.
+- **2D Ising.**
+  - Binder and ξ/L crossings at T_c.
+  - U* = 0.6107 and ξ/L* = 0.9050 at L = 16…128.
+  - The exact ln L growth of the specific heat.
+  - e(T_c) → −√2 as 1/L.
+- **3-state Potts.** Crossings at T_c = 1/ln(1+√3); e(T_c) → −(1 + 1/√3) as
+  L^−4/5.
+- **Majority-vote model.** q_c = 0.075, with Ising-class U at q_c.
+- **q-voter with independence, complete graph.**
+  - p_c = (q−1)/(q−1+2^(q−1)) for q = 3, 4.
+  - The mean-field Binder value 0.2705 at p_c.
+  - The mean-field |m| in the ordered phase.
+- **Deffuant.** ⌊1/(2ε)⌋ major clusters; complete consensus above ε = ½.
+- **Hegselmann–Krause.** The consensus threshold ε ≈ 0.2 on the complete graph.
+- **Coarsening.**
+  - Ising quench: L ∼ t^½, excess broken bonds ∼ t^−½, and the ageing
+    collapse of C(t, t_w).
+  - 2D voter: interface density ρ(t) ≈ π/(2 ln t + ln 256).
+- **Single-thread speed** of the lattice models at 64² and 1000² (information
+  only).
 
 ## License
 

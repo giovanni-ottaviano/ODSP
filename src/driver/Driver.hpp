@@ -206,16 +206,15 @@ void execute(const Options& raw, const std::string& command) {
     save_config(first, p0.prefix);
 
     // Points run in parallel. Seeds are drawn up front in point order, so the
-    // results do not depend on the thread count.
-    // P points at a time, each with threads / P threads for its replicas or chains.
+    // results do not depend on the thread count. The points, and their
+    // replicas or chains, share one pool of --threads workers: threads freed by
+    // finished points help the ones still running (see Parallel.hpp).
     std::mt19937 seeder(p0.seed);
     seeder();   // the graph seed
     const std::size_t n = plans.size();
     std::vector<unsigned> point_seeds(n);
     for (unsigned& sd : point_seeds) sd = seeder();
     const int budget = resolve_threads(p0.threads);
-    const int concurrent = std::max(1, std::min(budget, static_cast<int>(n)));
-    const int inner = std::max(1, budget / concurrent);
 
     // Rows are printed and written in point order as soon as all earlier  points are done.
     std::unique_ptr<CsvWriter> csv;
@@ -265,12 +264,12 @@ void execute(const Options& raw, const std::string& command) {
             }
         }
     };
-    parallel_for(static_cast<int>(n), concurrent, [&](int idx) {
+    parallel_for(static_cast<int>(n), budget, [&](int idx) {
         const std::size_t i = static_cast<std::size_t>(idx);
         const Plan<T>& p = plans[i];
         const std::string point_prefix = p.prefix.empty() ? std::string() : p.prefix + "_point" + std::to_string(i);
-        Row row = p.task == "ensemble" ? task_ensemble<T>(p.params, p.setup, point_seeds[i], inner, point_prefix, false)
-                                       : task_stationary<T>(p.params, p.setup, point_seeds[i], "", false, inner);
+        Row row = p.task == "ensemble" ? task_ensemble<T>(p.params, p.setup, point_seeds[i], budget, point_prefix, false)
+                                       : task_stationary<T>(p.params, p.setup, point_seeds[i], "", false, budget);
         std::lock_guard<std::mutex> lock(print_mutex);
         rows[i] = std::move(row);
         finished[i] = 1;

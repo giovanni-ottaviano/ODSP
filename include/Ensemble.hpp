@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "Model.hpp"
+#include "Parallel.hpp"
 
 // Runs many independent replicas of a model and aggregates the ENSEMBLE-level
 // observables -- the ones that are only defined across a collection of runs, not
@@ -42,7 +43,9 @@
 // is drawn up front from the ensemble seed and results are stored by replica
 // index, so the Result is IDENTICAL for any number of threads. With threads > 1
 // the factory is called concurrently, so it must not modify shared state
-// (capturing parameters by value, as above, is safe).
+// (capturing parameters by value, as above, is safe). Called from inside a
+// par::parallel_for loop (e.g. one point of a parallel sweep), the replicas use
+// that loop's thread pool instead, and `threads` is ignored.
 // Number of worker threads for a requested count. threads <= 0 means "all
 // cores": std::thread::hardware_concurrency(), capped by the environment
 // variable ODSP_MAX_THREADS when it holds a positive integer (e.g. to keep some
@@ -265,32 +268,9 @@ Ensemble<T>::run(int replicas, long long max_steps, bool use_mc_steps, int threa
         if (hooks.finish) hooks.finish(r, *model);
     };
 
-    threads = resolve_threads(threads);
-    threads = std::min(threads, replicas);
-
-    if (threads == 1) {
-        for (int r = 0; r < replicas; ++r) run_replica(r);
-    } else {
-        std::atomic<int>   next{0};
-        std::exception_ptr error;
-        std::mutex         error_mutex;
-        auto worker = [&]() {
-            for (int r = next++; r < replicas; r = next++) {
-                try {
-                    run_replica(r);
-                } catch (...) {
-                    std::lock_guard<std::mutex> lock(error_mutex);
-                    if (!error) error = std::current_exception();
-                    next = replicas;   // stop handing out work
-                }
-            }
-        };
-        std::vector<std::thread> pool;
-        pool.reserve(threads);
-        for (int t = 0; t < threads; ++t) pool.emplace_back(worker);
-        for (std::thread& t : pool) t.join();
-        if (error) std::rethrow_exception(error);
-    }
+    // Inside an enclosing parallel loop (a sweep point) the replicas join its
+    // thread pool and `threads` is ignored (see Parallel.hpp).
+    par::parallel_for(replicas, resolve_threads(threads), run_replica);
 
     // Aggregate in replica order.
     double node_count = 0.0, sum_rho = 0.0, sum_capped_time = 0.0, sum_opinions = 0.0;

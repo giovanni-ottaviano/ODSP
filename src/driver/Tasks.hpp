@@ -26,6 +26,11 @@
 
 namespace driver {
 
+// The library's nesting parallel loop (include/Parallel.hpp): a sweep point's
+// replicas or chains run on the same pool as the sweep, so threads freed by
+// finished points help the ones still running.
+using par::parallel_for;
+
 using Row = std::vector<std::pair<std::string, double>>;
 
 struct TaskParams {

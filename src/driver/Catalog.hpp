@@ -244,7 +244,8 @@ inline void print_help(const std::string& topic) {
                      "  stationary  burn-in, then --samples of --observable: mean, |mean|, susceptibility,\n"
                      "              Binder cumulant with jackknife errors, autocorrelation time\n"
                      "  --sweep KEY=VALUES repeats ensemble or stationary for each value and writes one table;\n"
-                     "  points run in parallel within --threads (results do not depend on the thread count).\n\n";
+                     "  points, and their replicas or chains, share --threads threads (results do not depend\n"
+                     "  on the thread count).\n\n";
         print_options(task_options());
     }
     else if (topic == "init") {

@@ -129,13 +129,17 @@ inline const std::vector<OptionDoc>& task_options() {
 
 inline const std::vector<OptionDoc>& init_options() {
     static const std::vector<OptionDoc> opts = {
-        {"init", "random|all|up|down|balanced|fractions|distinct|uniform", "model-dependent", "initial opinions"},
+        {"init", "random|all|up|down|balanced|fractions|distinct|uniform|file", "model-dependent", "initial opinions"},
         {"up", "f", "0.5", "random: fraction of +1 (the rest -1)"},
         {"value", "x", "1", "all: the opinion every node starts with (up = +1, down = -1)"},
         {"opinions", "q", "model-dependent", "balanced: opinions 0..q-1 in equal shares"},
         {"fractions", "f0,f1,...", "", "fractions: share of each opinion 0, 1, ... (required with --init fractions)"},
         {"lo", "x", "0", "uniform: lower end"},
         {"hi", "x", "1", "uniform: upper end"},
+        {"init-path", "file", "", "file: 'node opinion' lines; node = edge-list label with --graph file, "
+                                  "else index 0..N-1 (required with --init file)"},
+        {"init-fill", "error|random|x", "error", "file: nodes missing from the file are an error, drawn from the "
+                                                 "file's opinions, or set to x"},
         {"zealots", "count:opinion,...", "", "frozen nodes, e.g. 5:1,5:-1"},
         {"zealot-placement", "random|hubs", "random", "zealots on random nodes or on the highest-degree ones"},
     };

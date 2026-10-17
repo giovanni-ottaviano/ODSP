@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -12,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -86,6 +89,7 @@ struct Topology {
     std::vector<int> dims;
     Boundary    boundary = Boundary::Periodic;
     EdgeList    edges;
+    std::vector<std::string> labels;   // file graphs: the edge-list label of each node
     std::string description;
 };
 
@@ -173,9 +177,11 @@ inline Topology build_topology(const TopologySpec& t, std::mt19937& rng) {
         if (t.lcc) {
             const Subgraph s = largest_connected_component(f.nodes, f.edges);
             g.nodes = s.nodes; g.edges = s.edges;
+            for (std::size_t i : s.original)
+                g.labels.push_back(f.labels[i]);
         }
         else {
-            g.nodes = f.nodes; g.edges = f.edges;
+            g.nodes = f.nodes; g.edges = f.edges; g.labels = f.labels;
         }
         d << "network from " << t.path << (t.lcc ? " (largest component)" : "");
     }
@@ -411,6 +417,20 @@ struct InitSpec {
     bool zealots_on_hubs = false;
     bool multi = false;   // more than the two opinions +/-1
     std::string description;
+
+    // --init file: the entries as read, how nodes without one are filled, and
+    // (after resolve_init_file) the opinion of every node of the graph.
+    struct FileEntry {
+        std::string node;
+        double opinion = 0.0;
+        std::size_t line = 0;
+    };
+    std::string path;
+    std::vector<FileEntry> entries;
+    bool fill_random = false, fill_fixed = false;
+    double fill_value = 0.0;
+    std::vector<double> node_opinion;   // per node; NaN = fill
+    std::vector<double> fill_pool;      // the opinions of the matched nodes (random fill)
 };
 
 inline std::string fmt_opinion(double v) {
@@ -419,13 +439,119 @@ inline std::string fmt_opinion(double v) {
     return os.str();
 }
 
+// --init file: one "node opinion" pair per line. Fields are separated as in
+// edge-list files (spaces, tabs, ',' or ';'); lines starting with '#' or '%'
+// are comments and extra columns are ignored. With --graph file the node is
+// its edge-list label, otherwise its index 0..N-1 (checked against the graph
+// in resolve_init_file). Opinions must be integers for discrete models.
+inline std::vector<InitSpec::FileEntry> read_opinion_file(const std::string& path, bool discrete,
+                                                          const std::string& model) {
+    std::ifstream in(path);
+    if (!in)
+        throw OptionError("--init-path " + path + ": cannot open the file");
+    std::vector<InitSpec::FileEntry> entries;
+    std::unordered_map<std::string, std::size_t> first_line;
+    std::string line;
+    for (std::size_t line_no = 1; std::getline(in, line); ++line_no) {
+        for (char& c : line)
+            if (c == ',' || c == ';' || c == '\t' || c == '\r') c = ' ';
+        std::istringstream fields(line);
+        std::string node, value;
+        if (!(fields >> node) || node[0] == '#' || node[0] == '%')
+            continue;
+        const std::string where = "--init-path " + path + ", line " + std::to_string(line_no) + ": ";
+        if (!(fields >> value))
+            throw OptionError(where + "expected a node and its opinion, got only '" + node + "'");
+        InitSpec::FileEntry e{node, 0.0, line_no};
+        try {
+            std::size_t used = 0;
+            e.opinion = std::stod(value, &used);
+            if (used != value.size() || !std::isfinite(e.opinion))
+                throw std::invalid_argument(value);
+        } catch (const std::exception&) {
+            throw OptionError(where + "expected a number for the opinion of node " + node + ", got '" + value + "'");
+        }
+        if (discrete && e.opinion != std::floor(e.opinion))
+            throw OptionError(where + "opinion " + value + " of node " + node + " is not an integer (model " + model +
+                              " has discrete opinions)");
+        const auto seen = first_line.emplace(node, line_no);
+        if (!seen.second)
+            throw OptionError(where + "node " + node + " appears twice (first on line " +
+                              std::to_string(seen.first->second) + ")");
+        entries.push_back(e);
+    }
+    return entries;
+}
+
+// Matches the entries of an --init file to the nodes of the graph: by
+// edge-list label for file graphs (entries for other labels are counted and
+// skipped), by index otherwise. Nodes without an entry are filled as
+// --init-fill says, or are an error.
+inline void resolve_init_file(InitSpec& s, const Topology& g) {
+    const std::size_t n = g.nodes;
+    s.node_opinion.assign(n, std::numeric_limits<double>::quiet_NaN());
+    s.fill_pool.clear();
+    std::size_t skipped = 0;
+    std::unordered_map<std::string, std::size_t> node_of;
+    for (std::size_t i = 0; i < g.labels.size(); ++i)
+        node_of.emplace(g.labels[i], i);
+    for (const auto& e : s.entries) {
+        std::size_t node = n;
+        if (!g.labels.empty()) {
+            const auto it = node_of.find(e.node);
+            if (it == node_of.end()) {
+                ++skipped;
+                continue;
+            }
+            node = it->second;
+        } else {
+            try {
+                std::size_t used = 0;
+                const unsigned long long k = std::stoull(e.node, &used);
+                if (used == e.node.size() && e.node[0] != '-' && k < n)
+                    node = static_cast<std::size_t>(k);
+            } catch (const std::exception&) {}
+            if (node == n)
+                throw OptionError("--init-path " + s.path + ", line " + std::to_string(e.line) + ": node " + e.node +
+                                  " is not an index 0.." + std::to_string(n - 1) +
+                                  " (nodes are named by their edge-list labels only with --graph file)");
+        }
+        s.node_opinion[node] = e.opinion;
+        s.fill_pool.push_back(e.opinion);
+    }
+
+    std::vector<std::size_t> missing;
+    for (std::size_t i = 0; i < n; ++i)
+        if (std::isnan(s.node_opinion[i]))
+            missing.push_back(i);
+    std::ostringstream d;
+    if (!missing.empty()) {
+        if (!s.fill_random && !s.fill_fixed) {
+            std::ostringstream m;
+            m << "--init-path " << s.path << ": " << missing.size() << " of the " << n
+              << " nodes have no opinion in the file (e.g.";
+            for (std::size_t k = 0; k < std::min<std::size_t>(missing.size(), 5); ++k)
+                m << ' ' << (g.labels.empty() ? std::to_string(missing[k]) : g.labels[missing[k]]);
+            m << "); add them, or set --init-fill random (drawn from the file's opinions) or --init-fill <opinion>";
+            throw OptionError(m.str());
+        }
+        if (s.fill_random && s.fill_pool.empty())
+            throw OptionError("--init-path " + s.path + ": no entry of the file is a node of the graph, so "
+                              "--init-fill random has no opinions to draw from");
+        d << "; " << missing.size() << (s.fill_random ? " filled at random" : " filled with " + fmt_opinion(s.fill_value));
+    }
+    if (skipped > 0)
+        d << "; " << skipped << " entries not in the graph";
+    s.description += d.str();
+}
+
 inline InitSpec read_init(Options& o, const ModelSpec& m) {
     InitSpec s;
     const bool continuous = is_continuous(m.name);
     std::string fallback = continuous ? "uniform" : "random";
     if (m.name == "potts" || (m.name == "noisy-voter" && m.opinions > 2))
         fallback = "balanced";
-    s.kind = o.choice("init", fallback, {"random", "all", "up", "down", "balanced", "fractions", "distinct", "uniform"});
+    s.kind = o.choice("init", fallback, {"random", "all", "up", "down", "balanced", "fractions", "distinct", "uniform", "file"});
     std::ostringstream d;
     const std::string requested = s.kind;
     if (s.kind == "up")   { s.kind = "all"; s.value = 1.0; }
@@ -461,9 +587,33 @@ inline InitSpec read_init(Options& o, const ModelSpec& m) {
         s.lo = o.num("lo", 0.0); s.hi = o.num("hi", 1.0);
         d << "uniform in [" << s.lo << ", " << s.hi << ")";
     }
+    else if (s.kind == "file") {
+        s.path = o.str("init-path");
+        s.entries = read_opinion_file(s.path, !continuous, m.name);
+        const std::string fill = o.str("init-fill", "error");
+        if (fill == "random")
+            s.fill_random = true;
+        else if (fill != "error") {
+            try {
+                std::size_t used = 0;
+                s.fill_value = std::stod(fill, &used);
+                if (used != fill.size() || !std::isfinite(s.fill_value) ||
+                    (!continuous && s.fill_value != std::floor(s.fill_value)))
+                    throw std::invalid_argument(fill);
+            } catch (const std::exception&) {
+                throw OptionError("option --init-fill: expected error, random or " +
+                                  std::string(continuous ? "an opinion" : "an integer opinion") + ", got '" + fill + "'");
+            }
+            s.fill_fixed = true;
+        }
+        for (const auto& e : s.entries)
+            s.multi = s.multi || (!continuous && e.opinion != 1.0 && e.opinion != -1.0);
+        s.multi = s.multi || (s.fill_fixed && !continuous && s.fill_value != 1.0 && s.fill_value != -1.0);
+        d << "opinions from " << s.path;
+    }
 
-    if (continuous && s.kind != "uniform" && s.kind != "all")
-        throw OptionError("model " + m.name + " has continuous opinions: use --init uniform or all");
+    if (continuous && s.kind != "uniform" && s.kind != "all" && s.kind != "file")
+        throw OptionError("model " + m.name + " has continuous opinions: use --init uniform, all or file");
     if (!continuous && s.kind == "uniform")
         throw OptionError("--init uniform is for continuous-opinion models (deffuant, hk)");
     // Every opinion the start can produce must belong to the model's set.
@@ -477,10 +627,14 @@ inline InitSpec read_init(Options& o, const ModelSpec& m) {
         if (s.kind == "all")       produced = {s.value};
         if (s.kind == "balanced")  for (int k = 0; k < s.opinions; ++k) produced.push_back(k);
         if (s.kind == "fractions") for (std::size_t k = 0; k < s.fractions.size(); ++k) produced.push_back(static_cast<double>(k));
+        if (s.kind == "file")      for (const auto& e : s.entries) produced.push_back(e.opinion);
         for (double v : produced)
             if (!allowed.contains(v))
                 throw OptionError("model " + m.name + " is defined for opinions " + allowed.describe() + ", but --init " +
                                   requested + " starts with opinion " + fmt_opinion(v));
+        if (s.fill_fixed && !allowed.contains(s.fill_value))
+            throw OptionError("option --init-fill: model " + m.name + " is defined for opinions " + allowed.describe() +
+                              ", not " + fmt_opinion(s.fill_value));
     }
 
     for (const std::string& item : o.word_list("zealots", "")) {
@@ -523,6 +677,17 @@ std::vector<T> make_states(const InitSpec& s, std::size_t n, std::mt19937& rng) 
     if (s.kind == "balanced")  return convert(create_balanced_opinions(n, s.opinions, rng));
     if (s.kind == "fractions") return convert(create_opinions_with_fractions(n, s.fractions, rng));
     if (s.kind == "distinct")  return convert(create_distinct_opinions(n));
+    if (s.kind == "file") {    // matched to the graph by resolve_init_file
+        if (s.node_opinion.size() != n)
+            throw std::logic_error("make_states: --init file was not matched to this graph");
+        std::vector<T> out(n);
+        std::uniform_int_distribution<std::size_t> pick(0, s.fill_pool.empty() ? 0 : s.fill_pool.size() - 1);
+        for (std::size_t i = 0; i < n; ++i) {
+            const double v = s.node_opinion[i];
+            out[i] = static_cast<T>(!std::isnan(v) ? v : s.fill_random ? s.fill_pool[pick(rng)] : s.fill_value);
+        }
+        return out;
+    }
     const std::vector<double> u = create_uniform_opinions(n, rng, s.lo, s.hi);   // uniform
 
     return std::vector<T>(u.begin(), u.end());
@@ -750,6 +915,12 @@ inline std::vector<double> init_values(const InitSpec& init) {
     if (init.kind == "fractions")
         for (std::size_t k = 0; k < init.fractions.size(); ++k)
             v.push_back(static_cast<double>(k));
+    if (init.kind == "file") {
+        for (const auto& e : init.entries)
+            v.push_back(e.opinion);
+        if (init.fill_fixed)
+            v.push_back(init.fill_value);
+    }
     return v;
 }
 
@@ -767,6 +938,12 @@ Setup<T> read_setup(Options& o, unsigned graph_seed, TopologyCache* cache = null
     s.topology = (cache ? cache : &local)->get(s.topology_spec, graph_seed);
     if (s.topology->nodes == 0)
         throw OptionError("the graph has no nodes");
+    if (s.init.kind == "file") {
+        if (s.regenerate)
+            throw OptionError("--init file gives opinions to the nodes of one network: it cannot be combined with "
+                              "--regenerate-graph true");
+        resolve_init_file(s.init, *s.topology);
+    }
 
     const ModelSpec model = s.model;
     const TopologySpec spec = s.topology_spec;

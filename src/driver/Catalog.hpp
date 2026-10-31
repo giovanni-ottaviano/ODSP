@@ -121,7 +121,11 @@ inline const std::vector<OptionDoc>& task_options() {
         {"threshold", "x", "", "ensemble: also record when the largest opinion share first reaches x (discrete)"},
         {"tw", "t1,t2,...", "", "run/ensemble: waiting times of the autocorrelation/overlap observables (added to the recording times)"},
         {"correlation", "true|false", "false", "write the spatial correlation G(r) to prefix_correlation.csv (lattices; ensembles need a time series)"},
+        {"save-states", "true|false", "false", "write the final opinion of every node to prefix_states.csv (one column per replica or chain; "
+                                               "loads back with --init file; ensembles hold N x replicas values in memory)"},
         {"sweep", "key=v1,v2,... | key=start:stop:step", "", "repeat the ensemble or stationary task for each value of a parameter"},
+        {"sweep2", "key=v1,v2,... | key=start:stop:step", "", "with --sweep: a second parameter; runs every combination (--sweep outer), "
+                                                       "e.g. --sweep dims=16x16,32x32 --sweep2 temperature=2.2:2.3:0.01"},
     };
 
     return opts;
@@ -247,7 +251,8 @@ inline void print_help(const std::string& topic) {
                      "              time series averaged over replicas (absorbed runs keep their final value)\n"
                      "  stationary  burn-in, then --samples of --observable: mean, |mean|, susceptibility,\n"
                      "              Binder cumulant with jackknife errors, autocorrelation time\n"
-                     "  --sweep KEY=VALUES repeats ensemble or stationary for each value and writes one table;\n"
+                     "  --sweep KEY=VALUES repeats ensemble or stationary for each value and writes one table\n"
+                     "  (--sweep2 KEY2=VALUES adds a second parameter: the grid of all combinations);\n"
                      "  points, and their replicas or chains, share --threads threads (results do not depend\n"
                      "  on the thread count).\n\n";
         print_options(task_options());

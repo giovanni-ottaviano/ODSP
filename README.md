@@ -116,9 +116,15 @@ odsp --model deffuant --epsilon 0.2 --graph complete --n 1000 --task ensemble --
   (fraction not yet in consensus; first passage for models that can leave it).
   `--sweep key=v1,v2,...` or `key=start:stop:step` repeats `ensemble` or
   `stationary` for each value of any option and writes one table.
+  `--sweep2 key2=...` adds a second option and runs every combination
+  (`--sweep` outer), with both keys as the first columns of the table, e.g.
+  `--sweep dims=16x16,32x32,64x64 --sweep2 temperature=2.24:2.30:0.01` for a
+  finite-size scan in one run.
   `stationary --replicas R` runs R independent chains in parallel, pooling
   their samples (errors from the spread between chains, with a warning when
-  chains disagree beyond their own errors). Sweep points and their replicas or
+  chains disagree beyond their own errors). The output states how uncertain
+  the error bars themselves are: about 1/sqrt(2(R−1)), ±24% for 10 chains, so
+  use more chains when the error bars must be tight. Sweep points and their replicas or
   chains share one pool of `--threads` threads, so threads freed by finished
   points help the ones still running. Results never depend on the number of
   threads.
@@ -126,6 +132,23 @@ odsp --model deffuant --epsilon 0.2 --graph complete --n 1000 --task ensemble --
   `complete`, `gnp`, `gnm`, `regular`, `ws`, `ba`, `star`, `file`), initial
   condition, zealots, observables. `odsp --help models | graphs | tasks | init |
   observables` lists them all with defaults.
+- **Empirical starts**: `--init file --init-path opinions.txt` reads one
+  `node opinion` pair per line (separators and `#` comments as in edge-list
+  files). With `--graph file` the node is its label in the edge list, so the
+  two files match even after the largest component is kept. On other graphs
+  the node is its index 0..N-1. Nodes missing from the file are an error,
+  unless `--init-fill random` (drawn from the file's opinions, anew in every
+  replica) or `--init-fill <opinion>` fills them; entries for nodes not in the
+  graph are counted and skipped. Every replica starts from the file, and
+  `--zealots` still applies on top.
+- **Saving states**: `--save-states true` (with `--csv prefix`) writes the
+  final opinion of every node to `prefix_states.csv`, exactly, named as
+  above (edge-list label or index): one column for `run`, one per replica
+  for `ensemble`, one per chain for `stationary`, and one file per point
+  (`prefix_point<i>_states.csv`) in sweeps. The header is a `#` comment, so
+  the file loads back with `--init file --init-path prefix_states.csv`, which
+  reads the first column: to continue a run, or to start a new model from
+  where another stopped. Zealots are not marked in the file.
 - **Mistakes are caught**: an option that is misspelled or does not apply to
   the chosen model is an error ("--temprature ... a typo?", "--q does not
   apply here"), not silently ignored.

@@ -105,10 +105,14 @@ Plan<T> read_plan(Options& o, TopologyCache* cache = nullptr) {
     p.prefix = o.str("csv", "");
     p.provenance = o.flag("provenance", true);
     p.task = o.choice("task", "run", {"run", "ensemble", "stationary"});
-    o.str("sweep", "");   // read (and so recorded) here; interpreted by execute()
+    o.str("sweep", "");    // read (and so recorded) here; interpreted by execute()
+    o.str("sweep2", "");
     std::mt19937 seeder(p.seed);
     p.setup = read_setup<T>(o, seeder(), cache);
     p.params = read_task(o, p.task, p.setup.model, p.setup.init);
+    p.params.states_prefix = p.prefix;
+    if (p.params.save_states && p.prefix.empty())
+        throw OptionError("--save-states writes <prefix>_states.csv: add --csv <prefix>");
 
     // Fail now rather than after a long run: observables must exist for this
     // model and graph, and the model must accept its parameters. In `run` and
@@ -148,6 +152,9 @@ template <typename T>
 void execute(const Options& raw, const std::string& command) {
     Options o = raw;
     const std::string sweep_text = o.str("sweep", "");
+    const std::string sweep2_text = o.str("sweep2", "");
+    if (sweep_text.empty() && !sweep2_text.empty())
+        throw OptionError("--sweep2 needs --sweep: it adds a second parameter to a sweep");
     if (sweep_text.empty()) {
         Plan<T> p = read_plan<T>(o);
         check_unused(o);
@@ -170,27 +177,56 @@ void execute(const Options& raw, const std::string& command) {
         return;
     }
 
-    // ---- sweep: the same task for each value of one option ----
-    const SweepSpec sweep = parse_sweep(sweep_text);
-    for (const char* reserved : {"seed", "task", "sweep", "csv", "threads", "config"})
-        if (sweep.key == reserved)
-            throw OptionError("option --sweep: cannot sweep --" + sweep.key);
+    // ---- sweep: the same task for each value of one option, or for every
+    // combination of two (--sweep2, the inner loop) ----
+    std::vector<SweepSpec> sweeps = {parse_sweep(sweep_text, "sweep")};
+    if (!sweep2_text.empty())
+        sweeps.push_back(parse_sweep(sweep2_text, "sweep2"));
+    for (std::size_t d = 0; d < sweeps.size(); ++d) {
+        const std::string option = d == 0 ? "--sweep" : "--sweep2";
+        for (const char* reserved : {"seed", "task", "sweep", "sweep2", "csv", "threads", "config"})
+            if (sweeps[d].key == reserved)
+                throw OptionError("option " + option + ": cannot sweep --" + sweeps[d].key);
+        if (d == 1 && sweeps[1].key == sweeps[0].key)
+            throw OptionError("option --sweep2: --" + sweeps[1].key + " is already swept by --sweep");
+    }
+    if (sweeps.size() == 2 && sweeps[0].values.size() * sweeps[1].values.size() > 100000)
+        throw OptionError("option --sweep2: the grid has more than 100000 points");
+
+    // The grid in point order: --sweep outer, --sweep2 inner.
+    std::vector<std::vector<std::string>> grid;
+    for (const std::string& v0 : sweeps[0].values) {
+        if (sweeps.size() == 1)
+            grid.push_back({v0});
+        else
+            for (const std::string& v1 : sweeps[1].values)
+                grid.push_back({v0, v1});
+    }
+    // "dims=64x64 temperature=2.27", for messages.
+    auto point_name = [&sweeps](const std::vector<std::string>& values) {
+        std::string name;
+        for (std::size_t d = 0; d < values.size(); ++d)
+            name += (d ? " " : "") + (sweeps.size() > 1 ? sweeps[d].key + "=" : std::string()) + values[d];
+        return name;
+    };
 
     // Validate every point before running
     // Plans share built networks through the cache, so keeping them all costs one network, not one per point.
     std::vector<Plan<T>> plans;
     TopologyCache cache;
     Options first;
-    for (const std::string& value : sweep.values) {
+    for (const std::vector<std::string>& values : grid) {
         Options point = raw;
-        point.set(sweep.key, value);
+        for (std::size_t d = 0; d < sweeps.size(); ++d)
+            point.set(sweeps[d].key, values[d]);
         plans.push_back(read_plan<T>(point, &cache));
 
         if (plans.size() == 1) {
+            for (std::size_t d = 0; d < sweeps.size(); ++d)
+                if (!point.was_read(sweeps[d].key))
+                    throw OptionError(std::string("option ") + (d == 0 ? "--sweep" : "--sweep2") + ": --" + sweeps[d].key +
+                                      " does not apply to this configuration");
             check_unused(point);
-            if (!point.was_read(sweep.key))
-                throw OptionError("option --sweep: --" + sweep.key + " does not apply to this configuration");
-
             first = point;
         }
     }
@@ -200,7 +236,11 @@ void execute(const Options& raw, const std::string& command) {
     const ScopedPreamble preamble(p0.provenance ? provenance_text(command, first, p0.prefix) : std::string());
 
     std::cout << "odsp: " << p0.setup.description << "\n"
-              << "task: " << p0.task << " for " << sweep.values.size() << " values of --" << sweep.key
+              << "task: " << p0.task << " for "
+              << (sweeps.size() == 1 ? std::to_string(sweeps[0].values.size()) + " values of --" + sweeps[0].key
+                                     : std::to_string(sweeps[0].values.size()) + " x " +
+                                           std::to_string(sweeps[1].values.size()) + " values of --" + sweeps[0].key +
+                                           ", --" + sweeps[1].key)
               << ", seed " << p0.seed << "\n\n";
 
     save_config(first, p0.prefix);
@@ -215,6 +255,9 @@ void execute(const Options& raw, const std::string& command) {
     std::vector<unsigned> point_seeds(n);
     for (unsigned& sd : point_seeds) sd = seeder();
     const int budget = resolve_threads(p0.threads);
+    for (std::size_t i = 0; i < n; ++i)   // each point's final states in its own file
+        if (!plans[i].prefix.empty())
+            plans[i].params.states_prefix = plans[i].prefix + "_point" + std::to_string(i);
 
     // Rows are printed and written in point order as soon as all earlier  points are done.
     std::unique_ptr<CsvWriter> csv;
@@ -230,12 +273,15 @@ void execute(const Options& raw, const std::string& command) {
             const Plan<T>& p = plans[i];
             const Row& row = rows[i];
             if (i == 0) {
-                std::vector<std::string> header = {sweep.key};
+                std::vector<std::string> header;
+                for (const SweepSpec& sw : sweeps)
+                    header.push_back(sw.key);
                 for (const auto& c : row)
                     header.push_back(c.first);
 
                 csv = std::make_unique<CsvWriter>(p.prefix.empty() ? std::string() : p.prefix + "_sweep.csv", header);
-                std::cout << std::setw(12) << sweep.key;
+                for (const SweepSpec& sw : sweeps)
+                    std::cout << std::setw(12) << sw.key;
                 for (const auto& c : row) {
                     widths.push_back(std::max<std::size_t>(14, c.first.size() + 2));
                     if (printed_in_sweep(p.task, c.first))
@@ -247,8 +293,12 @@ void execute(const Options& raw, const std::string& command) {
             for (const auto& c : row)
                 values.push_back(c.second);
 
-            csv->row_values(sweep.values[i], values);
-            std::cout << std::setw(12) << sweep.values[i];
+            std::string keys;   // the point's values, one CSV column each (values contain no commas)
+            for (const std::string& v : grid[i]) {
+                keys += (keys.empty() ? "" : ",") + v;
+                std::cout << std::setw(12) << v;
+            }
+            csv->row_values(keys, values);
             for (std::size_t k = 0; k < row.size(); ++k)
                 if (printed_in_sweep(p.task, row[k].first))
                     std::cout << std::setw(static_cast<int>(widths[k])) << fmt(row[k].second);
@@ -260,7 +310,7 @@ void execute(const Options& raw, const std::string& command) {
                     if (c.first == "tau_abs")
                         tau = c.second;
                 if (static_cast<double>(p.params.samples) / p.params.blocks < 10.0 * tau)
-                    poorly_sampled.push_back(sweep.values[i]);
+                    poorly_sampled.push_back(point_name(grid[i]));
             }
         }
     };
@@ -275,10 +325,18 @@ void execute(const Options& raw, const std::string& command) {
         finished[i] = 1;
         print_ready_rows();
     });
+    if (p0.task == "stationary")
+        std::cout << "\nThe " << error_bar_note(p0.params.chains, p0.params.blocks) << ".\n";
     if (!poorly_sampled.empty()) {
-        std::cout << "\nWARNING: at --" << sweep.key << " =";
-        for (const auto& v : poorly_sampled)
-            std::cout << " " << v;
+        if (sweeps.size() == 1) {
+            std::cout << "\nWARNING: at --" << sweeps[0].key << " =";
+            for (const auto& v : poorly_sampled)
+                std::cout << " " << v;
+        } else {
+            std::cout << "\nWARNING: at";
+            for (std::size_t k = 0; k < poorly_sampled.size(); ++k)
+                std::cout << (k ? "," : "") << " " << poorly_sampled[k];
+        }
         std::cout << " the jackknife blocks are not much longer than the autocorrelation time (tau);\n"
                      "the error bars there may be underestimated (use more --samples or a larger --interval).\n";
     }

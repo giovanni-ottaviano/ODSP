@@ -51,6 +51,8 @@ struct TaskParams {
     double      threshold = std::nan("");   // ensemble: largest-share threshold (NaN = none)
     std::vector<long long> times;           // recording times (run; ensemble time series if non-empty)
     bool        correlation = false;        // write G(r) curves (--correlation)
+    bool        save_states = false;        // write the final configuration(s) (--save-states)
+    std::string states_prefix;              // ... to <states_prefix>_states.csv (a sweep point's own prefix)
 };
 
 // Observables measured against a snapshot at waiting time t_w ("_tw<t>").
@@ -123,6 +125,7 @@ inline int read_log_times(Options& o) {
 inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec& m, const InitSpec& init) {
     TaskParams t;
     t.task = task;
+    t.save_states = o.flag("save-states", false);
     auto positive = [&o](const std::string& key, long long fallback) {
         const long long v = o.integer(key, fallback);
         if (v < 1) throw OptionError("option --" + key + " must be >= 1");
@@ -184,6 +187,30 @@ inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec
 
 inline std::string path_for(const std::string& prefix, const std::string& name) {
     return prefix.empty() ? std::string() : prefix + "_" + name + ".csv";
+}
+
+// Final configurations, one column each, in the format --init file reads: a
+// commented header ("# node,<names>") and one row per node, named by
+// node_name(). Values are written exactly (shortest round-trip form).
+template <typename T>
+void write_states(const std::string& prefix, const Topology& g, const std::vector<std::string>& names,
+                  const std::vector<std::vector<T>>& columns) {
+    std::vector<std::string> header = {"# node"};
+    header.insert(header.end(), names.begin(), names.end());
+    CsvWriter out(path_for(prefix, "states"), header);
+    std::vector<double> row(columns.size());
+    for (std::size_t i = 0; i < g.nodes; ++i) {
+        for (std::size_t k = 0; k < columns.size(); ++k)
+            row[k] = static_cast<double>(columns[k][i]);
+        out.row_values(node_name(g, i), row);
+    }
+}
+
+inline std::vector<std::string> numbered(const std::string& name, int count) {
+    std::vector<std::string> v;
+    for (int k = 0; k < count; ++k)
+        v.push_back(name + std::to_string(k));
+    return v;
 }
 
 inline std::string fmt(double v, int precision = 6) {
@@ -249,6 +276,10 @@ void task_run(const TaskParams& t, const Setup<T>& s, unsigned seed, const std::
                            : (model->is_consensus_reached() ? " (in consensus at this moment)" : ""))
               << ".\n";
     if (!prefix.empty()) std::cout << "Time series written to " << path_for(prefix, "timeseries") << '\n';
+    if (t.save_states) {
+        write_states<T>(t.states_prefix, *s.topology, {"opinion"}, {model->get_graph().states()});
+        std::cout << "Final state written to " << path_for(t.states_prefix, "states") << '\n';
+    }
 }
 
 // ------------------------------------------------------------------ ensemble
@@ -318,9 +349,12 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
     // Continuous opinions: keep each replica's final clusters.
     std::vector<std::vector<OpinionCluster>> clusters(R);
     const bool keep_clusters = is_continuous(s.model.name) && !prefix.empty();
-    if (series || keep_clusters)
+    std::vector<std::vector<T>> finals(t.save_states ? R : 0);   // --save-states, by replica
+    if (series || keep_clusters || t.save_states)
         hooks.finish = [&, series, keep_clusters](int replica, const Model<T>& m) {
             const std::size_t r = static_cast<std::size_t>(replica);
+            if (t.save_states)
+                finals[r] = m.get_graph().states();
             for (; series && recorded[r] < K; ++recorded[r]) {
                 for (std::size_t o = 0; o < O; ++o) slot(r, recorded[r], o) = replica_obs[r][o](m);
                 if (t.correlation) curves[r * K + recorded[r]] = curve_of(m);
@@ -333,6 +367,11 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
 
     Ensemble<T> ens(s.factory, seed);
     const auto r = ens.run(t.replicas, t.steps, t.sweeps_unit, threads, obs, hooks);
+    if (t.save_states) {
+        write_states<T>(t.states_prefix, *s.topology, numbered("replica", t.replicas), finals);
+        if (verbose)
+            std::cout << "Final states written to " << path_for(t.states_prefix, "states") << " (one column per replica)\n";
+    }
     const std::vector<double>& absorbed_flags = r.final_observables.back();
     obs.pop_back();
     int absorbed = 0;
@@ -522,6 +561,23 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
 
 // ---------------------------------------------------------------- stationary
 
+// Relative uncertainty of an error bar estimated from `groups` independent
+// groups (chains, or the jackknife blocks of one chain): about 1/sqrt(2 (k-1)).
+// With 10 chains an error bar is itself uncertain by ~24%, so 2-3 sigma
+// deviations are less rare than for a known error.
+inline double error_bar_uncertainty(int groups) {
+    return groups > 1 ? 1.0 / std::sqrt(2.0 * (groups - 1)) : std::nan("");
+}
+
+inline std::string error_bar_note(int chains, int blocks) {
+    const int k = chains > 1 ? chains : blocks;
+    std::ostringstream os;
+    os << "error bars from " << k << (chains > 1 ? " chains" : " jackknife blocks")
+       << " are themselves uncertain by about +-" << std::lround(100.0 * error_bar_uncertainty(k)) << "%"
+       << (chains > 1 ? " (more --replicas narrow them)" : "");
+    return os.str();
+}
+
 template <typename T>
 Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const std::string& prefix, bool verbose,
                     int threads = 1) {
@@ -541,6 +597,7 @@ Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const
         typename Model<T>::StationarySample st;
         std::vector<double> energy, s0, s_min;    // per sample
         std::vector<std::vector<double>> curves;  // G(r) per sample (--correlation)
+        std::vector<T> final_state;               // --save-states
     };
     std::vector<Chain> chains(static_cast<std::size_t>(R));
     double N = 0.0;
@@ -573,7 +630,17 @@ Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const
             return base(m);
         };
         ch.st = model->sample_stationary(obs, t.burn_in, t.samples, t.interval, true, t.blocks);
+        if (t.save_states)
+            ch.final_state = model->get_graph().states();
     });
+    if (t.save_states) {
+        std::vector<std::vector<T>> finals;
+        for (const Chain& ch : chains)
+            finals.push_back(ch.final_state);
+        write_states<T>(t.states_prefix, *s.topology, numbered("chain", R), finals);
+        if (verbose)
+            std::cout << "Final states written to " << path_for(t.states_prefix, "states") << " (one column per chain)\n";
+    }
 
     // Pooled samples, chain after chain (equal lengths), so a jackknife with
     // one block per chain is leave-one-chain-out.
@@ -720,7 +787,8 @@ Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const
                   << "  N (<x^2> - <|x|>^2) " << fmt(estimate[3]) << " +- " << fmt(error[3], 3) << '\n'
                   << "  Binder cumulant     " << fmt(estimate[4]) << " +- " << fmt(error[4], 3) << '\n'
                   << "  autocorrelation     " << fmt(tau, 3) << " samples (of |x|: " << fmt(tau_abs, 3) << ")"
-                  << (R > 1 ? ", averaged over chains" : "") << '\n';
+                  << (R > 1 ? ", averaged over chains" : "") << '\n'
+                  << "  " << error_bar_note(R, t.blocks) << '\n';
         if (thermal && !energy.empty())
             std::cout << "  energy per site     " << fmt(e_mean) << " +- " << fmt(e_err, 3) << '\n'
                       << "  specific heat       " << fmt(heat) << " +- " << fmt(heat_err, 3) << "   (N var(e) / T^2)\n";
@@ -770,11 +838,13 @@ struct SweepSpec {
     std::vector<std::string> values;
 };
 
-inline SweepSpec parse_sweep(const std::string& text) {
+// `option` names the option in error messages ("sweep" or "sweep2").
+inline SweepSpec parse_sweep(const std::string& text, const std::string& option = "sweep") {
+    const std::string opt = "option --" + option;
     SweepSpec s;
     const std::size_t eq = text.find('=');
     if (eq == std::string::npos || eq == 0 || eq + 1 == text.size())
-        throw OptionError("option --sweep: expected key=v1,v2,... or key=start:stop:step, got '" + text + "'");
+        throw OptionError(opt + ": expected key=v1,v2,... or key=start:stop:step, got '" + text + "'");
     s.key = text.substr(0, eq);
     const std::string rest = text.substr(eq + 1);
     if (rest.find(':') != std::string::npos) {
@@ -783,12 +853,12 @@ inline SweepSpec parse_sweep(const std::string& text) {
         std::string item;
         while (std::getline(ss, item, ':')) {
             try { parts.push_back(std::stod(item)); }
-            catch (const std::exception&) { throw OptionError("option --sweep: bad number '" + item + "'"); }
+            catch (const std::exception&) { throw OptionError(opt + ": bad number '" + item + "'"); }
         }
         if (parts.size() != 3 || !(parts[2] > 0.0) || parts[1] < parts[0])
-            throw OptionError("option --sweep: a range is start:stop:step with stop >= start and step > 0");
+            throw OptionError(opt + ": a range is start:stop:step with stop >= start and step > 0");
         const long long n = static_cast<long long>(std::floor((parts[1] - parts[0]) / parts[2] + 1e-9));
-        if (n > 100000) throw OptionError("option --sweep: more than 100000 points");
+        if (n > 100000) throw OptionError(opt + ": more than 100000 points");
         for (long long i = 0; i <= n; ++i) {
             std::ostringstream os;
             os << std::setprecision(12) << parts[0] + static_cast<double>(i) * parts[2];
@@ -799,7 +869,7 @@ inline SweepSpec parse_sweep(const std::string& text) {
         std::string item;
         while (std::getline(ss, item, ',')) if (!item.empty()) s.values.push_back(item);
     }
-    if (s.values.empty()) throw OptionError("option --sweep: no values");
+    if (s.values.empty()) throw OptionError(opt + ": no values");
     return s;
 }
 

@@ -93,6 +93,11 @@ struct Topology {
     std::string description;
 };
 
+// How node i is named in files: its edge-list label for file graphs, else its index.
+inline std::string node_name(const Topology& g, std::size_t i) {
+    return g.labels.empty() ? std::to_string(i) : g.labels[i];
+}
+
 inline std::vector<int> parse_dims(const std::string& s) {
     std::vector<int> dims;
     std::stringstream ss(s);

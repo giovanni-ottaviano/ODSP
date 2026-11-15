@@ -6,12 +6,13 @@ import math
 
 import numpy as np
 
-from ..helpers import FIRST_PASSAGE, is_first_passage
+from ..helpers import FIRST_PASSAGE, is_first_passage, replica_times
 from ..io import Table
 from .style import (BINOMIAL, WILSON, binomial_yerr, color, finish, grid, hide_unused, new_fig,
                     numeric)
 
-BOOKKEEPING = ("replica", "reached_consensus", "absorbed", "stop_time", "freeze_time", "stripes")
+BOOKKEEPING = ("replica", "reached_consensus", "absorbed", "stop_time", "consensus_time",
+               "freeze_time", "stripes")
 
 
 def _warn(warnings, text):
@@ -43,8 +44,8 @@ def kaplan_meier(time: np.ndarray, event: np.ndarray):
 def survival_curve(stop, reached, absorbed=None):
     """P(no consensus by t) from the per-replica stop times.
 
-    Not for first-passage files (`helpers.is_first_passage`): their stop_time is the cap,
-    not the first-passage time, and `plot_replicas` does not draw the curve for them.
+    For first-passage files (`helpers.is_first_passage`) pass `helpers.replica_times`
+    instead of stop_time: their stop_time is the cap, not the first-passage time.
 
     A run that reached consensus is an event at its stop time. A run that stopped in an
     absorbing state without consensus (froze) never reaches it: its consensus time is
@@ -85,13 +86,15 @@ def plot_replicas(t: Table, warnings: list[str] | None = None):
             ax.set_title(f"{v.size} replicas", fontsize=8)
         hide_unused(axes, len(obs))
         figs.append(("replicas_final", finish(fig, t.provenance)))
-    first_passage = t.has("stop_time") and is_first_passage(t)
-    if first_passage:
+    first_passage = t.has("stop_time") and t.has("reached_consensus") and is_first_passage(t)
+    times = replica_times(t) if t.has("stop_time") and t.has("reached_consensus") else None
+    if first_passage and times is None:
         _warn(warnings, f"{ctx}: stop-time histogram and survival curve skipped: {FIRST_PASSAGE} "
-                        "(the driver's own survival column in _timeseries.csv, when present, is "
-                        "drawn with the time series)")
-    if t.has("stop_time") and t.has("reached_consensus") and not first_passage:
-        stop = t["stop_time"]
+                        "(files from a driver without the consensus_time column; the driver's own "
+                        "survival column in _timeseries.csv, when present, is drawn with the time "
+                        "series)")
+    if times is not None:
+        stop = times      # first passage: consensus_time where reached, the cap otherwise
         done = t["reached_consensus"] > 0.5
         absorbed = t["absorbed"] > 0.5 if t.has("absorbed") else None
         frozen = np.zeros(R, bool) if absorbed is None else absorbed & ~done
@@ -101,7 +104,8 @@ def plot_replicas(t: Table, warnings: list[str] | None = None):
         ax = axes[0, 0]
         ok = np.isfinite(stop)
         if not ok.all():
-            _warn(warnings, f"{ctx}: {int((~ok).sum())} non-finite stop_time values left out of "
+            _warn(warnings, f"{ctx}: {int((~ok).sum())} non-finite "
+                            f"{'first-passage (consensus_time)' if first_passage else 'stop_time'} values left out of "
                             "the stop-time histogram and survival curve")
         bins = np.histogram_bin_edges(stop[ok], bins=min(30, max(5, int(math.sqrt(R)) + 1))) \
             if ok.any() else 10
@@ -112,7 +116,7 @@ def plot_replicas(t: Table, warnings: list[str] | None = None):
             groups.append((stop[ok & capped], color(1), "censored (hit the cap before consensus)"))
         ax.hist([g[0] for g in groups], bins=bins, stacked=True, color=[g[1] for g in groups],
                 label=[g[2] for g in groups])
-        ax.set(xlabel="stop time", ylabel="replicas")
+        ax.set(xlabel="first-passage time" if first_passage else "stop time", ylabel="replicas")
         ax.legend(loc="upper right")
         ax = axes[0, 1]
         ts, ss = survival_curve(stop[ok], done[ok], None if absorbed is None else absorbed[ok])

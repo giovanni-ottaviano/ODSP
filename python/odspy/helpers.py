@@ -65,8 +65,11 @@ def is_first_passage(table: Table) -> bool:
     bounded-confidence models (Deffuant, Hegselmann-Krause): their absorbing state is
     detected one sweep after the last large change, so a replica reaching consensus in
     the last sweep before the cap has reached = 1, absorbed = 0, while its siblings are
-    absorbed. A file where no replica reached consensus cannot be told apart and is
-    reported False."""
+    absorbed. A `consensus_time` column (written by current drivers for first-passage runs
+    only) settles it; without it, a file where no replica reached consensus cannot be told
+    apart and is reported False."""
+    if table.has("consensus_time"):   # current drivers write it only for first-passage runs
+        return True
     if table.has("reached_consensus") and table.has("absorbed"):
         reached, absorbed = _num(table, "reached_consensus") > 0.5, _num(table, "absorbed") > 0.5
         return bool(np.any(reached & ~absorbed) and not np.any(absorbed))
@@ -74,6 +77,26 @@ def is_first_passage(table: Table) -> bool:
         frac, absorbed = _num(table, "consensus_fraction"), _num(table, "absorbed_fraction")
         return bool(np.all(absorbed == 0) and np.any(frac > 0))
     return False
+
+
+def replica_times(table: Table):
+    """Per-replica consensus times as the driver counts them, or None when they are not in
+    the file. Absorbing models: stop_time (the consensus time of a replica that reached
+    consensus, the stop of the others). First-passage models: the `consensus_time` column of
+    current drivers for replicas that reached consensus, stop_time (the cap, a censoring
+    time) for the others; older first-passage files lack the column -> None."""
+    stop = _num(table, "stop_time")
+    if not is_first_passage(table):
+        return stop
+    if not table.has("consensus_time"):
+        return None
+    reached = _num(table, "reached_consensus") > 0.5
+    return np.where(reached, _num(table, "consensus_time"), stop)
+
+
+FIRST_PASSAGE_FROM_COLUMN = ("first-passage times from the consensus_time column (the model "
+                             "can leave consensus: the first time each replica reached it; "
+                             "stop_time is the cap)")
 
 
 # ---------------------------------------------------------------- consensus time vs size
@@ -159,10 +182,12 @@ def consensus_time_vs_size(sources, size="auto", censored="exclude", model="powe
         or any(p[5] is not None and p[5].get("replicas") is not None
                and is_first_passage(p[5].get("replicas")) for p in pts)
     if first_passage:
-        if censored == "median":
+        if censored == "median" and any(p[5] is not None and p[5].get("replicas") is not None
+                                        and replica_times(p[5].get("replicas")) is None for p in pts):
             raise InputError(f"censored='median' needs each replica's consensus time: "
-                             f"{FIRST_PASSAGE}. Use censored='exclude': the sweep table's "
-                             "mean and median are the driver's first-passage times")
+                             f"{FIRST_PASSAGE} (files from a driver without the consensus_time "
+                             "column). Use censored='exclude': the sweep table's mean and median "
+                             "are the driver's first-passage times")
         notes.append(FIRST_PASSAGE_NOTE)
     if censored == "exclude":
         y = np.array([_num(p[2], "mean_consensus_time")[p[3]] for p in pts], float)
@@ -186,7 +211,9 @@ def consensus_time_vs_size(sources, size="auto", censored="exclude", model="powe
                                  f"file for row {p[4]} (<prefix>_point{p[4]}_replicas.csv), "
                                  "not found")
             rt = p[5].get("replicas")
-            stop, reached = _num(rt, "stop_time"), _num(rt, "reached_consensus")
+            stop, reached = replica_times(rt), _num(rt, "reached_consensus")
+            if stop is None:
+                raise InputError(f"{rt.path}: {FIRST_PASSAGE}")
             med = _driver_median(stop, reached)
             if not math.isfinite(med):
                 undetermined.append(k)
@@ -487,7 +514,7 @@ class Recovered:
 
 
 def _final_means(t: Table, values: dict, R: int) -> None:
-    skip = {"replica", "reached_consensus", "absorbed", "stop_time"}
+    skip = {"replica", "reached_consensus", "absorbed", "stop_time", "consensus_time"}   # bookkeeping
     for name in t.names:
         if name in skip or t[name].dtype == object:
             continue
@@ -513,9 +540,10 @@ def summarise_replicas(t: Table, config: dict[str, str] | None = None) -> Recove
     table's own; without `steps` the bound is undefined (NaN) when some run did not finish.
 
     For a model that can leave consensus (`is_first_passage`) stop_time is the cap for every
-    replica and the first-passage times are not in the file: no consensus-time statistic is
-    computed, and they are listed in `missing` (the driver's printed summary and sweep row
-    hold them)."""
+    replica: the statistics are those of the first-passage times in the `consensus_time`
+    column (the driver's own first-passage summary). Files from older drivers lack it; then
+    no consensus-time statistic is computed and the times are listed in `missing` (the
+    driver's printed summary and sweep row hold them)."""
     for name in ("reached_consensus", "absorbed", "stop_time"):
         if not t.has(name):
             raise InputError(f"{t.path}: no column '{name}': summarise_replicas needs a "
@@ -546,7 +574,9 @@ def summarise_replicas(t: Table, config: dict[str, str] | None = None) -> Recove
         "consensus_fraction": frac("consensus_fraction", n_done),
         "absorbed_fraction": frac("absorbed_fraction", int((absorbed > 0.5).sum())),
     }
-    if is_first_passage(t):
+    first_passage = is_first_passage(t)
+    times = replica_times(t)
+    if times is None:
         # stop_time is the cap for every replica: the first-passage times are not in the file
         notes.append("consensus_fraction: replicas that reached consensus at least once before "
                      "the cap (first passage; the model can leave consensus); final values are "
@@ -557,24 +587,27 @@ def summarise_replicas(t: Table, config: dict[str, str] | None = None) -> Recove
         _final_means(t, values, R)
         return Recovered(values, "recomputed from the per-replica file (population sd, as the "
                          "driver)", missing, notes)
+    if first_passage:
+        notes.append(FIRST_PASSAGE_FROM_COLUMN + "; consensus_fraction: replicas that reached "
+                     "consensus at least once before the cap; final values are measured at the cap")
     if n_done:
-        times = stop[done]
-        mean = float(times.mean())
-        sd = float(times.std())   # population sd, as the driver
+        done_times = times[done]
+        mean = float(done_times.mean())
+        sd = float(done_times.std())   # population sd, as the driver
         values["mean_consensus_time"] = (mean, sd / math.sqrt(n_done))
         values["sd_consensus_time"] = (sd, nan)
     # the driver's median: the ceil(R/2)-th smallest time over all replicas (unfinished
     # ones count as infinite), undefined when fewer than half finished
-    med = _driver_median(stop, reached)   # NaN when fewer than half finished
+    med = _driver_median(times, reached)   # NaN when fewer than half finished
     values["median_consensus_time"] = (med, nan)
     if n_done == R:
-        lower = float(stop.mean())
+        lower = float(times.mean())
     else:
         try:
             cap = float(config["steps"])
         except (KeyError, ValueError):
             cap = nan
-        lower = float((stop[done].sum() + cap * (R - n_done)) / R)
+        lower = float((times[done].sum() + cap * (R - n_done)) / R)
     values["mean_consensus_time_lower_bound"] = (lower, nan)
     if n_done < R:
         parts = []
@@ -588,7 +621,8 @@ def summarise_replicas(t: Table, config: dict[str, str] | None = None) -> Recove
                  "lower bound undefined: the cap (--steps) is not in the file's configuration")
         missing.append(f"mean_consensus_time: {CENSORED} ({'; '.join(parts)}; {bound})")
     _final_means(t, values, R)
-    _fixation_missing(t, missing)
+    if not first_passage:            # no fixation where consensus is not absorbing
+        _fixation_missing(t, missing)
     return Recovered(values, "recomputed from the per-replica file (population sd, as the "
                      "driver)", missing, notes)
 

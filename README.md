@@ -352,7 +352,9 @@ sweep (Monte Carlo step) is N updates.
   the final `m`, and censoring-aware summaries. For models that can leave
   consensus (noisy voter, Ising/Potts at T > 0, q-voter with p > 0, majority
   vote with noise), consensus times are *first-passage* times, every replica
-  runs to the cap, and no fixation is reported (`Result::first_passage`).
+  runs to the cap, and no fixation is reported (`Result::first_passage`); the
+  driver's `prefix_replicas.csv` then has a `consensus_time` column (the first
+  passage, `nan` if never reached) next to `stop_time` (the cap).
   Summaries:
   survival curve `survival(t)`, median consensus time, and a lower bound on the
   mean. The plain mean consensus time only covers runs that finished within the
@@ -427,9 +429,9 @@ named under `Warnings:`; any other failure is a bug, reported as
 
 Options: `plot [--per-point]`; `crossings --column --size auto|L|N --boot`;
 `fit --x --y --range lo:hi --model power|power+c|log|line --unweighted --censored
-exclude|median --size --boot`; `collapse --column --xc --nu --a --search --fix-a
---size --boot`. Size is the lattice side `L` (square or cubic dims) or the node
-count `N`, as the files say (`--size` overrides).
+exclude|median --size --boot --curve`; `collapse --column --xc --nu --a --search
+--fix-a --starts --size --boot`. Size is the lattice side `L` (square or cubic
+dims) or the node count `N`, as the files say (`--size` overrides).
 
 The suite never looks more certain than the data is:
 
@@ -445,12 +447,14 @@ The suite never looks more certain than the data is:
 - for a model that can leave consensus (noisy voter, Ising/Potts at T > 0,
   q-voter with p > 0, majority vote with noise: replicas reached consensus and
   none was ever absorbed; a bounded-confidence run that reached consensus in its
-  last sweep, before being marked absorbed, does not count) the replicas file holds the cap, not the first-passage
-  time: the ensemble summary lists the first-passage times as "not recoverable
-  from the files" (consensus_fraction, reached at least once, and the final
-  values stay), the stop-time histogram and survival curve are skipped with a
-  warning, and `fit --censored median` is refused; `fit --censored exclude` uses
-  the driver's sweep means and labels them first-passage times;
+  last sweep, before being marked absorbed, does not count) stop_time is the
+  cap and the first-passage time is in the `consensus_time` column: the summary,
+  the histogram, the survival curve and `fit --censored median` use it, and
+  everything is labelled first-passage time (consensus_fraction means reached
+  at least once). Files from drivers without that column get "first-passage
+  times: not recoverable from the files", the histogram and survival curve are
+  skipped with a warning and `--censored median` is refused; `fit --censored
+  exclude` always uses the driver's sweep means;
 - a mean consensus time with `consensus_fraction < 1` is a censored mean, biased
   low: `fit` excludes the point and names it (`--censored median` uses the
   driver's median instead, which needs the per-point replicas files);
@@ -460,7 +464,10 @@ The suite never looks more certain than the data is:
   T², whose expectation E[T²] is shown; when T² exceeds it the errors are scaled
   by sqrt(T²/E[T²])); without `prefix_trajectories.csv` the fit is labelled
   "errors not trustworthy" and no p-value is given. Fits to G(r) and to a single
-  run's time series are labelled the same way (their points share configurations);
+  run's time series are labelled the same way (their points share configurations).
+  A correlation file with one G(r) curve per time (or sweep) is never fitted as
+  one pooled set: `fit` takes the last curve and says so, `--curve VALUE` picks
+  another;
 - a fit with p below 0.01 is marked "poor fit"; a collapse with S above 3, too
   little overlap between sizes, a search that stopped at its overlap limit, or a
   searched x_c outside the measured x range (an extrapolation), or a searched
@@ -471,6 +478,18 @@ The suite never looks more certain than the data is:
   marked "POOR COLLAPSE" and its parameter errors are withheld (also when the
   bootstrap spread is degenerate, or when more than 20% of the bootstrap
   re-minimisations fail, ending pinned on the grid counting as a failure);
+  `--search` minimises from a grid of up to 15 starts around `--xc`/`--nu` (x_c
+  moved by up to ±5% of the x range, nu scaled by 0.8 to 1.25; `--starts 1` is
+  the given values alone) and keeps the best result that passes these checks;
+  the overlap-limit check looks within the optimum's own basin (1% of the x
+  range in x_c and in nu), and a collapse whose S rests on fewer than 60% of the
+  points is poor (barely overlapping curves can be made to agree in many ways;
+  the search itself needs 50%); a result next to a flagged optimum counts as
+  flagged; when the lowest S found is a flagged optimum the collapse is marked
+  poor and its errors are withheld (the reported minimum is only the best of
+  the rest); flagged optima with a comparable S are named ("set aside"), how
+  many starts ended flagged is reported, and a comparable minimum elsewhere (S
+  within 20%, farther than 2 errors) is named in a "start-dependent" warning;
 - a fit refused for too few points names the points it excluded and why;
 - a crossing outside the sampled range is "no crossing in range", never
   extrapolated; stationary sweeps warn when jackknife blocks are not much longer

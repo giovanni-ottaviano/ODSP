@@ -45,6 +45,7 @@ from .sizes import SizeCurve
 POOR_QUALITY = 3.0
 MIN_FRACTION = 0.5  # a collapse needs at least this fraction of all points in S ...
 MIN_PER_SIZE = 3  # ... and at least this many points of every size
+MIN_GOOD_FRACTION = 0.6  # below this fraction of the points in S, too little overlap to judge
 MAX_BOOT_FAILED = 0.2  # above this fraction of failed bootstrap minimisations: no errors
 MIN_SPREAD = 1e-6  # a bootstrap sd below this fraction of the initial step is not an error
 COINCIDENT_TOL = 1e-6  # scaled X closer than this fraction of the X span coincide ...
@@ -205,6 +206,12 @@ def _params(xc, nu, a, suffix=""):
     return xc, nu, a
 
 
+def _marginal_text(count, n):
+    return (f"too little overlap to judge: S rests on {count} of {n} points (below "
+            f"{MIN_GOOD_FRACTION:.0%}); scaled curves that barely overlap can be made to agree "
+            "in many ways, so the collapse is poor")
+
+
 def _result(data, xc, nu, a, errors, searched, fixed, method, extra, poor_because=()):
     """poor_because: reasons (warnings) that make the result poor whatever S is."""
     S, has = data.quality(xc, nu, a)
@@ -217,13 +224,16 @@ def _result(data, xc, nu, a, errors, searched, fixed, method, extra, poor_becaus
     elif count < data.n:
         warns.append(f"{data.n - count} of {data.n} points have no neighbours in another "
                      "size and are not in S")
+    marginal = not low and count < MIN_GOOD_FRACTION * data.n
     if low and count:
         warns.append(f"too little overlap: S rests on {count} of {data.n} points (a collapse "
                      f"needs at least {MIN_FRACTION:.0%} of the points and {MIN_PER_SIZE} "
                      "per size)")
+    if marginal and not any(w.startswith("too little overlap to judge") for w in poor_because):
+        warns.append(_marginal_text(count, data.n))
     warns += list(poor_because) + extra
     scaled = [(float(L), X, Y, E) for L, (X, Y, E) in zip(data.sizes, data.scale(xc, nu, a))]
-    poor = not math.isfinite(S) or S > POOR_QUALITY or low or bool(poor_because)
+    poor = not math.isfinite(S) or S > POOR_QUALITY or low or marginal or bool(poor_because)
     method += f"; S from {count} of {data.n} points"
     return CollapseResult(xc, nu, a, errors, S, poor, searched, fixed, method, warns, scaled,
                           count, data.n)
@@ -264,15 +274,37 @@ def _minimise(objective, start, steps):
     return best
 
 
+MAX_STARTS = 15
+COMPARABLE = 0.2  # another minimum within this fraction of the best S (or 0.1) is comparable
+
+
+def _start_grid(xc0, nu0, a0, span, n):
+    """The first n starts of a 5 x 3 grid around the given values, nearest first: x_c moved
+    by 0, ±2.5%, ±5% of the x span, nu scaled by 1, 0.8, 1.25 (a unchanged)."""
+    grid = [(k, f) for k in (0, -1, 1, -2, 2) for f in (1.0, 0.8, 1.25)]
+    grid.sort(key=lambda kf: (abs(kf[0]) + (kf[1] != 1.0), kf[0], kf[1]))
+    return [np.array([xc0 + 0.025 * span * k, nu0 * f, a0]) for k, f in grid[:n]]
+
+
 def search_collapse(curves, xc0: float, nu0: float, a0: float = 0.0, fit_a: bool = True,
-                    n_boot: int = 200, seed: int = 0) -> CollapseResult:
-    """Minimise S over (xc, nu[, a]) with Nelder-Mead from the starting values.
+                    n_boot: int = 200, seed: int = 0, starts: int = MAX_STARTS) -> CollapseResult:
+    """Minimise S over (xc, nu[, a]) with Nelder-Mead from several starting values.
+
+    S has local minima (it is only piecewise smooth), so the search runs from `starts`
+    points of a grid around the given values (x_c moved by up to ±5% of the x span, nu
+    scaled by 0.8 to 1.25; starts=1 is the given values alone) and keeps the best result
+    that passes every check below; if none does, the best of all, which is then flagged.
+    When another start ends in a different minimum whose S is comparable (within 20% of
+    the best, or 0.1), a "start-dependent" warning names it: the errors do not include
+    that ambiguity.
 
     The objective is S/(1+S) where the overlap thresholds hold and 1 + (missing
     points)/(all points) where they do not, so any parameters with enough overlap
     beat any without; the minimiser cannot escape into low overlap.
 
-    The result is poor, and its errors are withheld (nan), when the search did not
+    The result is poor, and its errors are withheld (nan), when S rests on fewer than
+    MIN_GOOD_FRACTION (60%) of the points (the search needs MIN_FRACTION, 50%: just above
+    it, barely overlapping curves can be made to agree in many ways), when the search did not
     converge, when its optimum is held by the overlap limit (a move of 1% of the initial
     simplex step in xc or nu takes the overlap below the limit: there S and the
     parameters describe the limit, not the data), when the optimum is held by coincident
@@ -291,6 +323,9 @@ def search_collapse(curves, xc0: float, nu0: float, a0: float = 0.0, fit_a: bool
     xc0, nu0, a0 = _params(xc0, nu0, a0, "0")
     if isinstance(n_boot, bool) or not isinstance(n_boot, (int, np.integer)) or n_boot < 2:
         raise InputError(f"n_boot must be an integer >= 2, got {n_boot!r}")
+    if isinstance(starts, bool) or not isinstance(starts, (int, np.integer)) \
+            or not 1 <= starts <= MAX_STARTS:
+        raise InputError(f"starts must be an integer from 1 to {MAX_STARTS}, got {starts!r}")
     if not isinstance(fit_a, (bool, np.bool_)):
         raise InputError(f"fit_a must be True or False, got {fit_a!r}")
     data = _Data(curves)
@@ -317,40 +352,156 @@ def search_collapse(curves, xc0: float, nu0: float, a0: float = 0.0, fit_a: bool
     probes = 0.01 * steps[:2]
     a_of = (lambda q: q[2]) if fit_a else (lambda q: a0)
 
-    def at_limit(q):
-        """True if a small move in xc or nu from q leaves too little overlap."""
+    def at_limit(q, moves=None):
+        """True if a small move in xc or nu from q leaves too little overlap (by default
+        1% of the initial simplex step; `moves` gives other sizes)."""
+        moves = probes if moves is None else moves
         for i in (0, 1):
             for sign in (1, -1):
                 r = np.array(q, float)
-                r[i] += sign * probes[i]
+                r[i] += sign * moves[i]
                 if r[1] <= 0 or data.shortfall(data.quality(r[0], r[1], a_of(q))[1]):
                     return True
         return False
 
+    def near_limit(q):
+        """The optimum's own check: overlap lost within its basin (1% of the x span in x_c,
+        1% in nu). An optimum resting on barely enough points is held by the limit even when
+        no start ends flagged next to it; bootstrap draws use the finer `at_limit`."""
+        return at_limit(q, (0.01 * span, 0.01 * abs(q[1])))
+
     extra: list[str] = []
-    best = _minimise(objective, start, steps)
+    lo_x, hi_x = (float(f(np.concatenate(data.x))) for f in (np.min, np.max))
+
+    def flag(r):
+        """Why a result fails the checks (None if it passes): not converged, too little
+        overlap or at its limit, held by coincident points, x_c outside the measured range
+        or a poor S."""
+        if not (r.success and np.all(np.isfinite(r.x))):
+            return "did not converge"
+        if r.fun >= 1.0:
+            return "too little overlap"
+        S = r.fun / (1.0 - r.fun)
+        if not S <= POOR_QUALITY:
+            return f"poor collapse (S = {S:.3g})"
+        if not lo_x <= r.x[0] <= hi_x:
+            return "x_c outside the measured range"
+        if int(data.quality(r.x[0], r.x[1], a_of(r.x))[1].sum()) < MIN_GOOD_FRACTION * data.n:
+            return "too little overlap to judge"
+        if near_limit(r.x):
+            return "at the overlap limit"
+        r.pairs = _pinned(data, r.x[0], r.x[1], a_of(r.x))   # kept for the main checks below
+        return "held by coincident scaled points" if r.pairs else None
+
+    runs = [_minimise(objective, q[:len(names)], steps)
+            for q in _start_grid(xc0, nu0, a0, span, int(starts))]
+    why = [flag(r) for r in runs]
+    # a run that passes but ends in the basin of a flagged optimum (the guards are knife-edge:
+    # a few 1e-4 of the span off the pin, or just past the overlap limit) is that optimum
+    located = [(r, w) for r, w in zip(runs, why)
+               if w not in (None, "did not converge", "too little overlap",
+                            "too little overlap to judge")]
+    for k, (r, w) in enumerate(zip(runs, why)):
+        if w is None:
+            for f, fw in located:
+                if (abs(r.x[0] - f.x[0]) <= 0.01 * span
+                        and abs(r.x[1] - f.x[1]) <= 0.01 * abs(f.x[1])):
+                    why[k] = f"next to an optimum {fw}"
+                    break
+    good = [r for r, w in zip(runs, why) if w is None]
+    if good:
+        best = min(good, key=lambda r: r.fun)
+    else:   # every start flagged: report the best converged optimum inside the measured range
+        inside = [r for r in runs if r.success and np.all(np.isfinite(r.x)) and r.fun < 1.0
+                  and lo_x <= r.x[0] <= hi_x]
+        best = min(inside, key=lambda r: r.fun) if inside else \
+            max(runs, key=lambda r: (bool(r.success), -r.fun))
+    flagged = len(runs) - len(good)
+    if len(runs) > 1 and flagged * 2 > len(runs):   # information: the verdict is the optimum's own
+        extra.append(f"{flagged} of {len(runs)} starts ended in flagged optima (not converged, "
+                     "too little overlap or at its limit, held by coincident scaled points, "
+                     "outside the measured range or poor S)"
+                     + ("; the best of the others is reported" if good else
+                        "; the best of them inside the measured range is reported"))
+    # the lowest S found belongs to a flagged optimum (pinned, at the overlap limit, outside
+    # the range): the reported minimum is then only the best of the others, not the answer
+    located_better = None
+    if good:
+        lower = [(r.fun, r.x, w) for r, w in zip(runs, why) if r.fun < best.fun
+                 and w not in (None, "did not converge", "too little overlap",
+                               "too little overlap to judge")
+                 and not str(w).startswith("poor collapse")]
+        if lower:
+            located_better = min(lower, key=lambda o: o[0])
+    if good:
+        S_ref = best.fun / (1.0 - best.fun)
+        aside = [(r.fun / (1.0 - r.fun), r.x, w) for r, w in zip(runs, why)
+                 if w is not None and r.success and np.all(np.isfinite(r.x)) and r.fun < 1.0
+                 and r.fun / (1.0 - r.fun) <= S_ref + max(COMPARABLE * S_ref, 0.1)]
+        if aside:
+            S_a, x_a, w_a = min(aside, key=lambda o: o[0])
+            extra.append(f"set aside: {len(aside)} start(s) ended in flagged optima with a "
+                         f"comparable S, e.g. xc={x_a[0]:.6g}, nu={x_a[1]:.6g} with S = {S_a:.3g} "
+                         f"({w_a})")
+    # other good minima with a comparable S: compared with the best after the bootstrap,
+    # in units of its errors (minima closer than the errors are the same answer)
+    S_best = best.fun / (1.0 - best.fun) if best.fun < 1.0 else math.inf
+    comparable = [(r.fun / (1.0 - r.fun), np.array(r.x, float)) for r in good
+                  if r is not best and r.fun / (1.0 - r.fun) <= S_best + max(COMPARABLE * S_best, 0.1)]
+
+    def start_dependence(errs):
+        """Warn about comparable minima farther from the best than 2 errors (or, without
+        errors, than 1% of the x span in x_c or 10% in nu or a)."""
+        far = []
+        for S_r, x in comparable:
+            d = np.abs(x - best.x)
+            if all(math.isfinite(errs.get(n, math.nan)) for n in names):
+                moved = any(d[i] > 2 * errs[n] for i, n in enumerate(names))
+            else:
+                moved = (d[0] > 0.01 * span or d[1] > 0.1 * abs(best.x[1])
+                         or (fit_a and d[2] > 0.1 * max(abs(best.x[2]), 0.1)))
+            if moved:
+                far.append((S_r, x))
+        if far:
+            S_o, x_o = min(far, key=lambda o: o[0])
+            where = f"xc={x_o[0]:.6g}, nu={x_o[1]:.6g}" + (f", a={x_o[2]:.6g}" if fit_a else "")
+            extra.append(f"start-dependent: another minimum at {where} with S = {S_o:.3g} "
+                         f"(best S = {S_best:.3g}; {len(far)} of {len(runs)} starts end in "
+                         "comparable minima elsewhere): the errors do not include this ambiguity")
     p = best.x
     a = float(p[2]) if fit_a else a0
     head = (QUALITY + "; Nelder-Mead minimisation of S"
-            + ("" if fit_a else f" (a fixed at {a0:g})"))
+            + ("" if fit_a else f" (a fixed at {a0:g})")
+            + (f", best of {len(runs)} starts ({flagged} flagged)" if len(runs) > 1 else ", 1 start"))
     errors = {n: math.nan for n in names}
-    if not best.success:
+    if located_better is not None:
+        f_b, x_b, w_b = located_better
+        short = "the lowest S found is a flagged optimum"
+        whys = [f"{short} (xc={x_b[0]:.6g}, nu={x_b[1]:.6g}, S = {f_b / (1 - f_b):.3g}: {w_b}): the "
+                "reported minimum is only the best of the others and the data do not pin down a "
+                "collapse; errors withheld"]
+    elif not best.success:
         short, whys = "search did not converge", [f"search did not converge: {best.message}"]
     elif best.fun >= 1.0:  # _result reports the too little overlap and marks it poor
         short, whys = "search ended with too little overlap", []
-    elif at_limit(p):
+    elif near_limit(p):
         short = "search constrained by the overlap limit"
         whys = [short + ": a small move of xc or nu leaves fewer than "
                 f"{MIN_FRACTION:.0%} of the points (or {MIN_PER_SIZE} per size) in S, so "
                 "the optimum and S describe the limit, not the data"]
     else:  # these reasons can hold together: every one is reported
         shorts, whys = [], []
-        pairs = _pinned(data, float(p[0]), float(p[1]), a)
+        pairs = best.get("pairs")
+        if pairs is None:
+            pairs = _pinned(data, float(p[0]), float(p[1]), a)
         if pairs:
             shorts.append("optimum held by coincident scaled points")
             whys.append(f"{PINNED} ({pairs} pairs of points of different sizes coincide in X "
                         f"at the optimum; more than {MAX_COINCIDENT} pin it)")
-        S = data.quality(float(p[0]), float(p[1]), a)[0]
+        S, has_p = data.quality(float(p[0]), float(p[1]), a)
+        if int(has_p.sum()) < MIN_GOOD_FRACTION * data.n:
+            shorts.append("too little overlap to judge")
+            whys.append(_marginal_text(int(has_p.sum()), data.n))
         lo, hi = (float(f(np.concatenate(data.x))) for f in (np.min, np.max))
         if not lo <= p[0] <= hi:
             shorts.append("x_c outside the measured range")
@@ -361,6 +512,7 @@ def search_collapse(curves, xc0: float, nu0: float, a0: float = 0.0, fit_a: bool
             whys.append(f"errors withheld: poor collapse (S = {S:.3g})")
         short = "; ".join(shorts)
     if short:
+        start_dependence(errors)
         return _result(data, float(p[0]), float(p[1]), a, errors, True, fixed,
                        head + f"; errors withheld: {short}", extra, whys)
     rng = np.random.default_rng(seed)
@@ -393,6 +545,7 @@ def search_collapse(curves, xc0: float, nu0: float, a0: float = 0.0, fit_a: bool
         extra.append(f"{failed} of {n_boot} bootstrap minimisations did not converge, "
                      "ended at or below the overlap limit or on coincident scaled points, "
                      "and are not in the errors")
+    start_dependence(errors)
     method = head + (f"; errors: sd over parametric bootstrap (n={n_boot}, {failed} failed) "
                      "re-minimisations")
     return _result(data, float(p[0]), float(p[1]), a, errors, True, fixed, method, extra)

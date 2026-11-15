@@ -383,3 +383,36 @@ def test_fixation_at_one_drawn_with_wilson_interval(tmp_path):
     for _, f in figs:
         plt.close(f)
     assert any("Wilson" in s for s in labels) and bars and max(bars) > 0.1
+
+
+def test_unexpected_drawing_error_skips_only_that_table(tmp_path, monkeypatch):
+    import odspy.plots as P
+
+    def boom(*a, **k):
+        plt.figure()                                  # half-drawn figure must be closed
+        raise ValueError("boom")
+    monkeypatch.setattr(P, "plot_timeseries_run", boom)
+    (tmp_path / "c_timeseries.csv").write_text(
+        cfg(task="run", model="voter", dims="4x4") + "sweep,m\n0,1\n1,0.5\n")
+    (tmp_path / "c_histogram.csv").write_text(
+        cfg(task="stationary", model="ising", dims="4x4") + "bin_low,bin_high,count,density\n0,0.5,3,1.2\n0.5,1,2,0.8\n")
+    before = set(plt.get_fignums())
+    figs, warns = figures_for(find_outputs(str(tmp_path / "c")))
+    assert any("figures for timeseries_run skipped" in w and "ValueError: boom" in w for w in warns)
+    assert any(n.startswith("histogram") for n, _ in figs)
+    for _, f in figs:
+        plt.close(f)
+    assert set(plt.get_fignums()) == before
+
+
+def test_unexpected_error_in_vs_key_figure_skips_only_it(outputs, monkeypatch):
+    import odspy.plots as P
+
+    def boom(*a, **k):
+        raise RuntimeError("vs key exploded")
+    monkeypatch.setattr(P, "plot_clusters_vs_key", boom)
+    figs, warns = figures_for(find_outputs(outputs["cont"]))
+    assert any("clusters vs key skipped" in w and "RuntimeError: vs key exploded" in w for w in warns)
+    assert figs
+    for _, f in figs:
+        plt.close(f)

@@ -66,6 +66,9 @@ def _parser() -> argparse.ArgumentParser:
                    help="mean_consensus_time vs size: censored points excluded, or the median")
     q.add_argument("--size", choices=("auto", "L", "N"), default="auto")
     q.add_argument("--boot", type=int, default=1000, help="bootstrap resamples (time series, median)")
+    q.add_argument("--curve", type=float, default=None, metavar="VALUE",
+                   help="correlation file with several curves: the time (or sweep) of the one to fit "
+                        "(default: the last)")
 
     q = sub.add_parser("collapse", help="finite-size-scaling data collapse of a column")
     common(q)
@@ -75,6 +78,9 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("--a", type=float, default=0.0)
     q.add_argument("--search", action="store_true", help="minimise S from the given values")
     q.add_argument("--fix-a", action="store_true", help="with --search, keep a fixed")
+    q.add_argument("--starts", type=int, default=None, metavar="N",
+                   help="with --search, starting points from a grid around --xc/--nu "
+                        "(1 to 15, default 15; 1 = the given values alone)")
     q.add_argument("--size", choices=("auto", "L", "N"), default="auto")
     q.add_argument("--boot", type=int, default=200, help="bootstrap minimisations for the errors")
     return p
@@ -193,11 +199,42 @@ def _need(table, name: str) -> None:
         raise InputError(f"{table.path}: no column '{name}' (columns: {', '.join(table.names)})")
 
 
+CURVE_ONLY = "--curve is only for correlation files with several curves (one per time or sweep)"
+
+
+def _one_curve(t, curve, rep):
+    """Rows of the G(r) curve to fit in a correlation table holding one curve per time (or
+    sweep): the last by default, or the one at `curve`. Pooling the curves would fit points
+    from different times as if they were one curve."""
+    group = {"correlation_run": "sweep", "correlation_ensemble": "time"}.get(t.kind)
+    values = sorted(set(np.asarray(t[group], dtype=float).tolist())) if group and t.has(group) else []
+    if len(values) < 2:
+        if curve is not None:
+            raise InputError(f"{CURVE_ONLY}; {t.path.name} holds one")
+        return np.ones(len(t), dtype=bool)
+    if curve is None:
+        chosen = values[-1]
+    else:
+        # a typed value equal to a curve's up to rounding, never within reach of two curves
+        tol = min(1e-9 * max(1.0, abs(curve)), 0.25 * float(np.min(np.diff(values))))
+        match = [v for v in values if abs(v - curve) <= tol]
+        if not match:
+            shown = ", ".join(f"{v:.10g}" for v in values[:12]) + (", ..." if len(values) > 12 else "")
+            raise InputError(f"{t.path}: no curve with {group} = {curve:.10g} (has {shown})")
+        chosen = match[0]
+    rep.add(f"{t.path.name} holds {len(values)} curves (one per {group}); fitted the curve at "
+            f"{group} = {chosen:.10g}" + (" (the last; --curve picks another)" if curve is None else ""))
+    return np.asarray(t[group], dtype=float) == chosen   # exact: chosen comes from the column
+
+
 def cmd_fit(args) -> tuple[Report, str]:
     rep, out = Report(), _outdir(args)
     xrange = _range(args.xrange)
     stem = _stem(args.prefix[0])
     first = find_outputs(args.prefix[0])
+    if args.curve is not None and (args.y == "mean_consensus_time" or args.x == "time"
+                                   or first.provenance.config.get("sweep2")):
+        raise InputError(CURVE_ONLY)
     if args.y == "mean_consensus_time" and args.x in (None, "size"):
         rep.files("Files read", [t.path for p in args.prefix
                                  for t in find_outputs(p).tables.values()])
@@ -247,14 +284,17 @@ def cmd_fit(args) -> tuple[Report, str]:
                          + "; ".join(f"{t.path} ({', '.join(t.names)})" for t in tables))
     t = hit[0]
     rep.files("Files read", [t.path])
-    x = np.asarray(t[args.x])
-    y = np.asarray(t[args.y])
+    if args.curve is not None and not t.kind.startswith("correlation"):
+        raise InputError(f"{CURVE_ONLY}; {t.path.name} is not one")
+    rows = _one_curve(t, args.curve, rep) if t.kind.startswith("correlation") else np.ones(len(t), bool)
+    x = np.asarray(t[args.x])[rows]
+    y = np.asarray(t[args.y])[rows]
     if x.dtype == object or y.dtype == object:
         raise InputError(f"{t.path}: columns '{args.x}' and '{args.y}' must be numeric")
     # the error of <o>_mean is <o>_err (as G_mean / G_err); otherwise <y>_err
     base = args.y[:-len("_mean")] if args.y.endswith("_mean") else None
     ename = base + "_err" if base and t.has(base + "_err") else args.y + "_err"
-    yerr = t[ename].astype(float) if t.has(ename) and not args.unweighted else None
+    yerr = t[ename].astype(float)[rows] if t.has(ename) and not args.unweighted else None
     r = fit(x.astype(float), y.astype(float), yerr, model=args.model, xrange=xrange,
             unweighted=args.unweighted)
     # points of one table that share their configurations: chi2 and p would mean nothing
@@ -262,11 +302,6 @@ def cmd_fit(args) -> tuple[Report, str]:
         UNTRUSTWORTHY_G if t.kind.startswith("correlation") else None
     if label is not None:
         mark_untrustworthy(r, label)
-        group = {"correlation_run": "sweep", "correlation_ensemble": "time"}.get(t.kind)
-        if group and t.has(group) and len(set(np.asarray(t[group]).tolist())) > 1:
-            n = len(set(np.asarray(t[group]).tolist()))
-            r.warnings.append(f"{t.path.name} holds {n} curves (one per {group}); they were "
-                              "fitted together as one set of points")
     name = f"{stem}_fit_{_safe(args.y)}"
     _fit_one(rep, r, out, name, args.x, args.y, first.provenance)
     return rep, name
@@ -279,10 +314,11 @@ def cmd_collapse(args) -> tuple[Report, str]:
     curves = families(args.prefix, args.column, size=args.size)
     rep.files("Files read", sorted({c.source for c in curves}))
     if args.search:
-        r = search_collapse(curves, args.xc, args.nu, args.a, fit_a=not args.fix_a, n_boot=args.boot)
+        r = search_collapse(curves, args.xc, args.nu, args.a, fit_a=not args.fix_a, n_boot=args.boot,
+                            starts=15 if args.starts is None else args.starts)
     else:
-        if args.fix_a or args.boot != 200:
-            rep.warn("--fix-a and --boot only apply with --search; ignored")
+        if args.fix_a or args.boot != 200 or args.starts is not None:
+            rep.warn("--fix-a, --boot and --starts only apply with --search; ignored")
         r = collapse(curves, args.xc, args.nu, args.a)
     rep.lines.extend(collapse_lines(r))
     rep.warn(*r.warnings)

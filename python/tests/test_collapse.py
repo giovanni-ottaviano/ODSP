@@ -248,7 +248,7 @@ def _no_pins(monkeypatch):
 def test_few_failed_minimisations_are_counted(monkeypatch):
     _no_pins(monkeypatch)
     _flaky(monkeypatch, lambda n: n == 5)  # 1 of 10 draws (call 1 is the main fit)
-    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=10)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, starts=1, n_boot=10)
     assert not res.poor
     assert any("1 of 10 bootstrap minimisations did not converge" in w for w in res.warnings)
     assert "bootstrap (n=10, 1 failed)" in res.method
@@ -258,7 +258,7 @@ def test_few_failed_minimisations_are_counted(monkeypatch):
 def test_many_failed_minimisations_withhold_errors(monkeypatch):
     _no_pins(monkeypatch)
     _flaky(monkeypatch, lambda n: n % 3 == 0)  # 3 of 9 draws: above 20%
-    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=9)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, starts=1, n_boot=9)
     assert set(res.errors) == {"xc", "nu", "a"}
     assert all(math.isnan(v) for v in res.errors.values())
     assert any("3 of 9 bootstrap minimisations did not converge" in w and "20%" in w
@@ -268,7 +268,7 @@ def test_many_failed_minimisations_withhold_errors(monkeypatch):
 
 def test_unconverged_search_is_poor_without_errors(monkeypatch):
     _flaky(monkeypatch, lambda n: n == 1)  # only the main fit
-    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=5)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, starts=1, n_boot=5)
     assert res.poor
     assert set(res.errors) == {"xc", "nu", "a"}
     assert all(math.isnan(v) for v in res.errors.values())
@@ -278,7 +278,7 @@ def test_unconverged_search_is_poor_without_errors(monkeypatch):
 
 def test_all_failed_minimisations_withhold_errors(monkeypatch):
     _flaky(monkeypatch, lambda n: n > 1)  # every draw, not the main fit
-    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=3)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, starts=1, n_boot=3)
     assert all(math.isnan(v) for v in res.errors.values())
     assert any("3 of 3 bootstrap" in w for w in res.warnings)
 
@@ -370,9 +370,16 @@ def shifted_windows(seed):
     return out
 
 
+@pytest.mark.parametrize("seed", [1, 2])
+def test_several_starts_near_the_overlap_limit_give_no_confident_errors(seed):
+    res = search_collapse(shifted_windows(seed), XC, NU, A, n_boot=5)
+    assert res.poor
+    assert all(math.isnan(v) for v in res.errors.values())
+
+
 @pytest.mark.parametrize("seed", [1, 2, 4])
 def test_search_held_by_the_overlap_limit_is_poor(seed):
-    res = search_collapse(shifted_windows(seed), XC, NU, A, n_boot=5)
+    res = search_collapse(shifted_windows(seed), XC, NU, A, starts=1, n_boot=5)
     print(f"seed {seed}: S={res.quality:.3g} {res.points_used}/{res.points_total} "
           f"poor={res.poor} {res.errors}")
     assert res.poor
@@ -403,7 +410,7 @@ def test_degenerate_bootstrap_spread_withholds_errors(monkeypatch):
             r.fun = objective(r.x)
         return r
     monkeypatch.setattr(col, "_minimise", stuck)
-    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=10)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, starts=1, n_boot=10)
     assert all(math.isnan(v) for v in res.errors.values())
     assert any("errors withheld" in w and "bootstrap" in w for w in res.warnings)
 
@@ -443,11 +450,24 @@ def test_search_pinned_on_coincident_scaled_points_is_poor(outputs, start):
     # there) and finite errors were reported (reviewer's probe_a2/probe_a4)
     from odspy import families
     curves = families([outputs["stat2"]], "abs_susceptibility")
-    res = search_collapse(curves, start[0], start[1], 1.75, n_boot=20)
+    res = search_collapse(curves, start[0], start[1], 1.75, starts=1, n_boot=20)
     assert res.poor
     assert all(math.isnan(v) for v in res.errors.values())
     assert any(PINNED in w and "try another start" in w for w in res.warnings)
     assert "coincident" in res.method
+
+
+def test_several_starts_on_the_coarse_grid_give_no_confident_errors(outputs):
+    # the same data with the default starts: the search may leave the pin for another
+    # minimum, but on this 7-temperature grid its errors must not come back confident
+    from odspy import families
+    curves = families([outputs["stat2"]], "abs_susceptibility")
+    res = search_collapse(curves, 2.35, 1.0, 1.75, n_boot=20)
+    # the pinned optimum is never reported as a good one: either the result is poor or it is
+    # another minimum, shown without errors and with the pinned one named as set aside
+    assert not (abs(res.xc - 2.35) < 0.01 * 0.3 and not res.poor)
+    assert all(math.isnan(v) for v in res.errors.values())
+    assert res.poor or any(w.startswith("set aside") for w in res.warnings)
 
 
 def test_healthy_optimum_on_the_same_data_is_not_flagged(outputs):
@@ -484,7 +504,7 @@ def test_bootstrap_draws_on_coincident_points_count_as_failed(monkeypatch):
         return 0 if calls["n"] == 1 else 7      # the main fit is fine, every draw is pinned
 
     monkeypatch.setattr(mod, "_pinned", fake)
-    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=5)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, starts=1, n_boot=5)
     assert all(math.isnan(v) for v in res.errors.values())
     assert any("5 of 5 bootstrap minimisations" in w and "coincident" in w for w in res.warnings)
     assert "bootstrap (n=5, 5 failed)" in res.method
@@ -497,3 +517,159 @@ def test_off_grid_optimum_with_a_few_coincidences_is_not_pinned(seed):
     res = search_collapse(scaling_curves(seed=seed), 2.25, 0.8, 0.2, n_boot=20)
     assert not any(PINNED in w for w in res.warnings)
     assert not res.poor
+
+
+
+# ------------------------------------------------------------- several starts
+
+def _count_minimise(monkeypatch):
+    mod = sys.modules["odspy.collapse"]
+    real = mod._minimise
+    calls = []
+
+    def counted(*args):
+        calls.append(1)
+        return real(*args)
+    monkeypatch.setattr(mod, "_minimise", counted)
+    return calls
+
+
+def test_starts_one_is_a_single_search(monkeypatch):
+    calls = _count_minimise(monkeypatch)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, starts=1, n_boot=3)
+    assert len(calls) == 1 + 3
+    assert "1 start" in res.method
+
+
+def test_default_search_tries_fifteen_starts(monkeypatch):
+    calls = _count_minimise(monkeypatch)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=3)
+    assert len(calls) == 15 + 3
+    assert "best of 15 starts" in res.method
+
+
+@pytest.mark.parametrize("starts", [0, 16, 2.5, True])
+def test_starts_must_be_between_1_and_15(starts):
+    with pytest.raises(InputError, match="starts"):
+        search_collapse(scaling_curves(), 2.25, 0.8, 0.2, starts=starts, n_boot=3)
+
+
+def _second_minimum(monkeypatch, shift, factor):
+    """Make the 2nd start end at the best fit moved by `shift` in xc, its objective value
+    scaled so that S becomes `factor` x the best S (the other starts run for real)."""
+    mod = sys.modules["odspy.collapse"]
+    real = mod._minimise
+    calls = []
+
+    def scripted(objective, start, steps):
+        calls.append(1)
+        r = real(objective, start, steps)
+        if len(calls) == 2:
+            first = real(objective, np.array([2.25, 0.8, 0.2]), steps)
+            x = np.array(first.x, float)
+            x[0] += shift
+            S = factor * first.fun / (1 - first.fun)
+            r.x, r.fun, r.success = x, S / (1 + S), True
+        return r
+    monkeypatch.setattr(mod, "_minimise", scripted)
+
+
+def test_comparable_minimum_elsewhere_warns(monkeypatch):
+    _second_minimum(monkeypatch, shift=0.01, factor=1.05)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=4)
+    assert any(w.startswith("start-dependent: another minimum at xc=") for w in res.warnings)
+
+
+def test_much_worse_minimum_elsewhere_does_not_warn(monkeypatch):
+    _second_minimum(monkeypatch, shift=0.01, factor=3.0)
+    res = search_collapse(scaling_curves(), 2.25, 0.8, 0.2, n_boot=4)
+    assert not any("start-dependent" in w for w in res.warnings)
+
+
+def test_several_starts_escape_a_local_minimum():
+    # seed 3 from (2.2, 0.5, 0.5): one start stops in a local minimum (S = 2.12, nu = 0.83);
+    # the grid of starts reaches the global one (S = 0.93, nu = 1.03; truth nu = 1)
+    one = search_collapse(scaling_curves(seed=3), 2.2, 0.5, 0.5, starts=1, n_boot=4)
+    many = search_collapse(scaling_curves(seed=3), 2.2, 0.5, 0.5, n_boot=4)
+    assert one.quality > 2.0 and abs(one.nu - 1.0) > 0.1
+    assert many.quality < 1.0 and abs(many.nu - 1.0) < 0.1
+    assert not any("start-dependent" in w for w in many.warnings)
+
+
+
+def test_comparable_minimum_within_the_errors_does_not_warn(monkeypatch):
+    # a second start ending 1e-5 away in x_c (far inside the ~2e-4 error) is the same answer
+    _second_minimum(monkeypatch, shift=1e-5, factor=1.05)
+    res = search_collapse(scaling_curves(seed=11), 2.25, 0.8, 0.2, n_boot=20)
+    assert all(math.isfinite(v) for v in res.errors.values())
+    assert not any("start-dependent" in w for w in res.warnings)
+
+
+
+@pytest.mark.parametrize("seed, start", [(1, (2.2708, 1.437, 0.527)), (2, (2.2704, 1.454, 0.513))])
+def test_optimum_near_the_overlap_limit_is_poor_from_its_own_start(seed, start):
+    # the nu ~ 1.44 optimum (truth 1.0) rests on 33 of 63 points: a move of 1% of the x span
+    # loses the overlap, so it is held by the limit even when no start ends flagged nearby
+    for starts in (15, 1):
+        res = search_collapse(shifted_windows(seed), *start, starts=starts, n_boot=5)
+        assert res.poor, (starts, res.nu, res.warnings)
+        assert all(math.isnan(v) for v in res.errors.values())
+
+
+@pytest.mark.parametrize("start", [(2.25, 0.8, 0.2), (2.27, 1.0, 0.25)])
+def test_verdict_does_not_count_flagged_starts(start):
+    # clean seed 10: several starts end flagged (on pins of the commensurate grid), none with a
+    # lower S than the reported optimum: the verdict is the optimum's own, not poor
+    res = search_collapse(scaling_curves(seed=10), *start, n_boot=10)
+    assert not res.poor, res.warnings
+    assert "flagged" in res.method
+
+
+def test_every_start_flagged_reports_an_in_range_optimum(outputs):
+    from odspy import families
+    curves = families([outputs["stat2"]], "abs_susceptibility")
+    res = search_collapse(curves, 2.4, 1.0, 1.75, n_boot=5)
+    assert res.poor
+    assert 2.1 <= res.xc <= 2.4 and 0 < res.nu < 10
+    assert any("starts" in w and "flagged" in w for w in res.warnings)
+
+
+@pytest.mark.parametrize("sigmas, warns", [(1.5, False), (3.0, True)])
+def test_start_dependence_boundary_is_two_errors(monkeypatch, sigmas, warns):
+    ref = search_collapse(scaling_curves(seed=11), 2.25, 0.8, 0.2, n_boot=20)
+    assert math.isfinite(ref.errors["xc"])
+    _second_minimum(monkeypatch, shift=sigmas * ref.errors["xc"], factor=1.05)
+    res = search_collapse(scaling_curves(seed=11), 2.25, 0.8, 0.2, n_boot=20)
+    assert any("start-dependent" in w for w in res.warnings) == warns
+
+
+
+def test_lowest_s_on_a_flagged_optimum_makes_the_result_poor():
+    # clean seed 11 from the true values: the lowest S is the pin at the true x_c (a measured
+    # value on this commensurate grid, flagged); the reported off-pin optimum (83 of 99 points)
+    # passes every check, but it is only the best of the rest
+    res = search_collapse(scaling_curves(seed=11), 2.27, 1.0, 0.25, n_boot=10)
+    assert res.points_used >= 0.6 * res.points_total
+    assert res.poor
+    assert any(w.startswith("the lowest S found is a flagged optimum") for w in res.warnings)
+    assert all(math.isnan(v) for v in res.errors.values())
+
+
+def test_valley_on_marginal_overlap_is_poor_from_every_start():
+    # shifted_windows seed 2: the starts slide along a valley (nu 1.45 .. 1.9, truth 1.0) of
+    # optima resting on about half of the points: poor however the search lands
+    for start in ((2.2704, 1.454, 0.513), (2.265, 2.0, 0.6), (2.29, 1.2, 0.5)):
+        res = search_collapse(shifted_windows(2), *start, n_boot=5)
+        assert res.poor, (start, res.nu)
+        assert all(math.isnan(v) for v in res.errors.values())
+
+
+def test_collapse_on_barely_enough_points_is_poor():
+    # shifted_windows seed 6 from this exact start: nu 1.585 (truth 1.0) rests on 33 of 63
+    # points and passed every other check; rounding the start flipped the verdict. The share
+    # of points in S is the optimum's own property: below 60% the collapse is poor
+    res = search_collapse(shifted_windows(6), 2.2210878519, 1.5327656431, 0.0331486478, n_boot=20)
+    assert res.points_used < 0.6 * res.points_total
+    assert res.poor
+    assert all(math.isnan(v) for v in res.errors.values())
+    assert any("60%" in w for w in res.warnings)

@@ -213,3 +213,66 @@ these two weaknesses showed up along the way.
   R chains an error bar is itself uncertain by ~1/sqrt(2(R−1)) (±24% for 10),
   so the output now states that ("error bars from 10 chains are themselves
   uncertain by about ±24%"), in single runs and once per sweep.
+
+## From the domain-statistics and odspy reviews (2026-10-31 / 2026-11-13)
+
+Deferred review findings worth keeping, after the work was committed. None
+blocks use; each was judged safe to leave. Effort S unless noted.
+
+### ~~Small follow-ups~~ (done 2026-11-15)
+- ~~Skip one figure, not the report~~: a drawing error in one table's figures is
+  caught, the figures closed and the reason reported; the rest is drawn.
+- ~~G(r) fits fit one curve~~: the last curve by default, `--curve VALUE` picks
+  another; pooling is gone.
+- ~~First-passage times in the replicas file~~: the driver writes
+  `consensus_time` for models that can leave consensus; odspy recovers the
+  first-passage mean, median, lower bound and survival from it (older files
+  keep the "not recoverable" note).
+- ~~Collapse from several starts~~: up to 15 starts (`--starts`), best passing
+  result kept, "start-dependent" warning for comparable minima farther than
+  2 errors.
+
+### Known limitations
+- The collapse guard against grid-pinned optima also flags good fits whose
+  true x_c lies exactly on a commensurate grid (L = 8:16:32 with nu = 1:
+  5 of 20 synthetic seeds with one start; about 1 in 5 seed/start pairs with
+  the default 15 starts, where a collapse is also poor when the lowest S found
+  is a flagged optimum). Collapses whose S rests on fewer than 60% of the
+  points are always poor. Remedy for users: a finer or shifted temperature
+  grid, or less commensurate sizes.
+- Files from drivers before the `consensus_time` column: a first-passage
+  replicas file in which no replica ever reached consensus cannot be recognised
+  (treated as capped; the lower bound is still valid). Mixed sweeps (some
+  points first-passage, some not) are labelled all or nothing.
+- Each domain observable runs its own union-find pass (about 56 MB transient
+  per reading at 1024^2 in 2D); a per-reading cache would cut that 5x.
+- `MajorityModel::is_absorbing_state()` / `is_frozen_state()` are const but
+  write mutable scratch: not safe to call concurrently on one model.
+- A majority replica that starts in consensus reports `stop_time` 1 but
+  `freeze_time` 0.
+- The driver's stdout note "runs did not reach consensus ... true mean >= X"
+  is misleading for majority runs frozen away from consensus (odspy reports
+  them correctly).
+
+### odspy rough edges
+- Report: stationary caveats and "values <= 0 not shown" warnings can appear
+  twice; several crossings for one size pair are listed as independent
+  measurements; "model None" instead of "model unknown" without provenance;
+  `odspy P.csv` for a missing file suggests nothing; a prefix named like a
+  subcommand needs `./`.
+- Statistics wording: the singular-covariance warning also fires on GLS
+  non-convergence; on the bootstrap path a copied "parameter errors could not
+  be estimated" note can sit next to finite errors; adjacent crossing errors
+  are not independent, so a drift error must not combine them as if they were.
+- `stationary_caveats` implements the driver's tau_abs short-block rule but not
+  its sign-change NOTE (block < 10 tau); `summarise_samples` takes the last
+  column as the observable.
+- Library calls with non-data arguments of the wrong type (`p_threshold`,
+  `model`, `seed`) can still raise TypeError; BOM-prefixed CSVs are rejected.
+- Figures: in-axes legends overlap curves in the ensemble time-series panels;
+  the Kaplan-Meier step line ends before the frozen-run markers.
+- Code health: `_warn` duplicated in five plot modules, dead `if False`
+  branches in `plots/sweeps.py`, `__import__` calls in `plots/states.py`; C++
+  test helpers (`run`, `read_csv`) duplicated across driver tests; Python tests
+  import helpers from other test files via `sys.path`; several weak or
+  conditional assertions (listed in the review ledgers).

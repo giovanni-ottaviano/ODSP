@@ -261,3 +261,84 @@ def test_fit_single_run_series_is_labelled(outputs, tmp_path, capsys):
     assert code == 0, err
     assert RUN_LABEL in out
     assert "chi2/dof = " not in out.replace("sqrt(chi2/dof) = ", "") and "p = " not in out
+
+
+def _two_curve_correlation(tmp_path):
+    """A G(r) file with two curves (t = 10: G = 1 - 0.2 r; t = 100: G = 1 - 0.1 r)."""
+    rows = ["time,r,G_mean,G_err"]
+    for t, slope in ((10, 0.2), (100, 0.1)):
+        for r in range(5):
+            rows.append(f"{t},{r},{1 - slope * r},0.01")
+    (tmp_path / "gc_correlation.csv").write_text("\n".join(rows) + "\n")
+    return str(tmp_path / "gc")
+
+
+def test_fit_correlation_fits_the_last_curve_by_default(tmp_path, capsys):
+    p = _two_curve_correlation(tmp_path)
+    code, out, err = run(["fit", p, "--x", "r", "--y", "G_mean", "--model", "line",
+                          "--out", str(tmp_path / "o")], capsys)
+    assert code == 0, err
+    assert "time = 100" in out and "2 curves" in out
+    assert "fitted together" not in out
+    assert "b = -0.1" in out                     # the t = 100 slope, not a pooled one
+
+
+def test_fit_correlation_curve_option_picks_another(tmp_path, capsys):
+    p = _two_curve_correlation(tmp_path)
+    code, out, err = run(["fit", p, "--x", "r", "--y", "G_mean", "--model", "line",
+                          "--curve", "10", "--out", str(tmp_path / "o")], capsys)
+    assert code == 0, err
+    assert "time = 10" in out and "b = -0.2" in out
+
+
+def test_fit_correlation_unknown_curve_is_an_input_error(tmp_path, capsys):
+    p = _two_curve_correlation(tmp_path)
+    code, out, err = run(["fit", p, "--x", "r", "--y", "G_mean", "--curve", "7",
+                          "--out", str(tmp_path / "o")], capsys)
+    assert code == 2
+    assert "no curve with time = 7" in err and "10" in err and "100" in err
+
+
+def test_curve_option_needs_a_multi_curve_table(outputs, tmp_path, capsys):
+    code, out, err = run(["fit", outputs["stat2"], "--x", "temperature", "--y", "binder",
+                          "--curve", "3", "--out", str(tmp_path)], capsys)
+    assert code == 2 and "--curve is only for correlation files with several curves" in err
+
+
+def test_collapse_starts_option(outputs, tmp_path, capsys):
+    base = ["collapse", outputs["stat2"], "--column", "binder", "--xc", "2.269", "--nu", "1",
+            "--search", "--boot", "4", "--out", str(tmp_path)]
+    code, out, err = run(base + ["--starts", "1"], capsys)
+    assert code == 0, err
+    assert ", 1 start" in out
+    code, out, err = run(base, capsys)
+    assert code == 0, err
+    assert "best of 15 starts" in out
+    code, out, err = run(base + ["--starts", "0"], capsys)
+    assert code == 2 and "starts" in err
+
+
+def test_collapse_starts_without_search_is_ignored_with_a_warning(outputs, tmp_path, capsys):
+    code, out, err = run(["collapse", outputs["stat2"], "--column", "binder", "--xc", "2.269",
+                          "--nu", "1", "--starts", "3", "--out", str(tmp_path)], capsys)
+    assert code == 0, err
+    assert "--starts" in out and "ignored" in out
+
+
+def test_fit_correlation_close_large_times_are_not_pooled(tmp_path, capsys):
+    # times 99999800 .. 100000000, 50 apart: a relative tolerance would merge them
+    rows = ["time,r,G_mean,G_err"]
+    times = list(range(99999800, 100000001, 50))
+    for k, t in enumerate(times):
+        for r in range(6):
+            rows.append(f"{t},{r},{1 - 0.01 * (k + 1) * r},0.01")
+    (tmp_path / "big_correlation.csv").write_text("\n".join(rows) + "\n")
+    p = str(tmp_path / "big")
+    code, out, err = run(["fit", p, "--x", "r", "--y", "G_mean", "--model", "line",
+                          "--out", str(tmp_path / "o")], capsys)
+    assert code == 0, err
+    assert "time = 100000000" in out and "b = -0.05" in out     # the last curve alone (k = 4)
+    code, out, err = run(["fit", p, "--x", "r", "--y", "G_mean", "--model", "line",
+                          "--curve", "99999900", "--out", str(tmp_path / "o")], capsys)
+    assert code == 0, err
+    assert "time = 99999900" in out and "b = -0.03" in out      # k = 2, not its neighbour

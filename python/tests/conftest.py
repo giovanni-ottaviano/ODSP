@@ -42,6 +42,9 @@ COMMANDS = {
             "--replicas 60 --steps 30 --seed 1"),
     "nv_sweep": ("--model noisy-voter --noise 0.001 --task ensemble --sweep dims=6x6,8x8,10x10 "
                  "--replicas 20 --steps 2000 --seed 3"),
+    # first passage with censored replicas (cap 150 sweeps) and an odd replica count
+    "nv_cens": ("--model noisy-voter --noise 0.001 --task ensemble --sweep dims=6x6,8x8,10x10 "
+                "--replicas 21 --steps 150 --seed 3"),
 }
 
 

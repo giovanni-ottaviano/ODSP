@@ -24,6 +24,16 @@ __all__ = ["caption", "figures_for", "iter_figures", "plot_clusters", "plot_clus
            "plot_sweep2", "plot_timeseries_ensemble", "plot_timeseries_run", "plot_trajectories", "save"]
 
 
+def _why(e: Exception) -> str:
+    """The reason a figure was skipped: input problems as they are, anything else with its type."""
+    return str(e) if isinstance(e, (InputError, KeyError)) else f"{type(e).__name__}: {e}"
+
+
+def _close_new(before: set[int]) -> None:
+    for n in set(plt.get_fignums()) - before:     # half-drawn figures
+        plt.close(n)
+
+
 def _table_figures(out: Outputs, warnings: list[str]):
     """Yield (name, Figure) for each table of `out`, one plotting function at a time."""
     simple = {
@@ -43,10 +53,9 @@ def _table_figures(out: Outputs, warnings: list[str]):
             else:
                 warnings.append(f"no standard figure for {kind} ({t.path})")
                 figs = []
-        except (InputError, KeyError) as e:
-            for n in set(plt.get_fignums()) - before:     # half-drawn figures
-                plt.close(n)
-            warnings.append(f"{t.path}: figures for {kind} skipped: {e}")
+        except Exception as e:      # one table's figures must not cost the others or the report
+            _close_new(before)
+            warnings.append(f"{t.path}: figures for {kind} skipped: {_why(e)}")
             figs = []
         yield from figs
 
@@ -74,17 +83,15 @@ def iter_figures(outputs: Outputs, per_point: bool = False, warnings: list[str] 
             n_files = sum(len(o.tables) for o in outputs.points.values())
             warnings.append(f"{n_files} per-point files ({len(outputs.points)} points) were read; "
                             "their own figures were skipped (per_point=True draws them)")
-        for fn in (plot_fixation_vs_key, plot_clusters_vs_key, plot_domains_vs_key):
-            kind = {"plot_fixation_vs_key": "fixation", "plot_clusters_vs_key": "clusters",
-                    "plot_domains_vs_key": "domains"}[fn.__name__]
+        for kind, fn in (("fixation", plot_fixation_vs_key), ("clusters", plot_clusters_vs_key),
+                         ("domains", plot_domains_vs_key)):
             if any(o.get(kind) is not None for o in outputs.points.values()):
                 before = set(plt.get_fignums())
                 try:
                     figs = fn(outputs, warnings=warnings)
-                except (InputError, KeyError) as e:
-                    for n in set(plt.get_fignums()) - before:
-                        plt.close(n)
-                    warnings.append(f"{kind} vs key skipped: {e}")
+                except Exception as e:
+                    _close_new(before)
+                    warnings.append(f"{kind} vs key skipped: {_why(e)}")
                     figs = []
                 for item in figs:
                     count += 1

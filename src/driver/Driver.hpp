@@ -113,6 +113,8 @@ Plan<T> read_plan(Options& o, TopologyCache* cache = nullptr) {
     p.params.states_prefix = p.prefix;
     if (p.params.save_states && p.prefix.empty())
         throw OptionError("--save-states writes <prefix>_states.csv: add --csv <prefix>");
+    if (p.params.save_trajectories && p.prefix.empty())
+        throw OptionError("--save-trajectories writes <prefix>_trajectories.csv: add --csv <prefix>");
 
     // Fail now rather than after a long run: observables must exist for this
     // model and graph, and the model must accept its parameters. In `run` and

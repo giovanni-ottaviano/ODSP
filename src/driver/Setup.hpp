@@ -25,6 +25,7 @@
 #include "Generators.hpp"
 #include "RegularLattice.hpp"
 #include "Correlations.hpp"
+#include "Domains.hpp"
 #include "Ensemble.hpp"
 #include "OpinionClusters.hpp"
 #include "Utils.hpp"
@@ -748,6 +749,7 @@ inline std::vector<std::string> default_observables(const ModelSpec& m, const In
 // the time unit of the run.
 struct ObservableContext {
     bool lattice = false;          // a RegularLattice
+    bool periodic = false;         // a RegularLattice with periodic boundaries (stripes)
     bool periodic_cubic = false;   // periodic boundaries and equal sides (structure factor)
     int  side = 0;                 // side length when periodic_cubic
     bool binary = false;           // opinions are +/-1
@@ -767,6 +769,12 @@ inline long long tw_of(const std::string& name) {
     } catch (const std::exception&) {
         return -1;
     }
+}
+
+// The observables computed from the domains of the state (Domains.hpp).
+inline bool is_domain_observable(const std::string& name) {
+    return name == "domains" || name == "largest_domain" || name == "mean_domain" || name == "weighted_domain" ||
+           name == "stripes";
 }
 
 // per_interval: the observable follows one trajectory in time (a time series),
@@ -861,6 +869,18 @@ Observable<T> make_observable(const std::string& name, const ModelSpec& m, bool 
             return [](const Model<T>& x) { return x.effective_number_of_opinions(); };
         if (name == "segregation")
             return [](const Model<T>& x) { return x.segregation(); };
+        if (name == "domains")
+            return [](const Model<T>& x) { return find_domains(x.get_graph()).density(); };
+        if (name == "largest_domain")
+            return [](const Model<T>& x) { return find_domains(x.get_graph()).largest_fraction(); };
+        if (name == "mean_domain")
+            return [](const Model<T>& x) { return find_domains(x.get_graph()).mean_size(); };
+        if (name == "weighted_domain")
+            return [](const Model<T>& x) { return find_domains(x.get_graph()).weighted_mean_size(); };
+        if (name == "stripes") {
+            need(ctx.periodic, "needs a periodic lattice (--graph lattice --boundary periodic)");
+            return [](const Model<T>& x) { return find_domains(x.get_graph()).stripes() ? 1.0 : 0.0; };
+        }
         if (name == "energy") {
             need(m.name == "ising" || m.name == "potts", "needs the ising or potts model");
             return [](const Model<T>& x) {
@@ -883,7 +903,8 @@ Observable<T> make_observable(const std::string& name, const ModelSpec& m, bool 
         if (name == "largest_cluster")
             return [](const Model<T>& x) { return largest_cluster_fraction(x.get_graph().states(), 1e-3); };
         need(name != "opinions" && name != "largest" && name != "energy" && name != "order" && name != "entropy" &&
-             name != "effective_opinions" && name != "segregation", "is for discrete opinions");
+             name != "effective_opinions" && name != "segregation" && !is_domain_observable(name),
+             "is for discrete opinions");
     }
     std::vector<std::string> names;
     for (const auto& d : observable_docs())
@@ -972,6 +993,7 @@ Setup<T> read_setup(Options& o, unsigned graph_seed, TopologyCache* cache = null
     // Observable context: geometry, and the opinion labels of the model.
     ObservableContext& c = s.context;
     c.lattice = s.topology->lattice;
+    c.periodic = c.lattice && s.topology->boundary == Boundary::Periodic;
     const std::vector<int>& dims = s.topology->dims;
     if (c.lattice && s.topology->boundary == Boundary::Periodic &&
         std::adjacent_find(dims.begin(), dims.end(), std::not_equal_to<int>()) == dims.end()) {

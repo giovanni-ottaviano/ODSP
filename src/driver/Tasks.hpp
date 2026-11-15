@@ -52,6 +52,7 @@ struct TaskParams {
     std::vector<long long> times;           // recording times (run; ensemble time series if non-empty)
     bool        correlation = false;        // write G(r) curves (--correlation)
     bool        save_states = false;        // write the final configuration(s) (--save-states)
+    bool        save_trajectories = false;  // ensemble: every replica's time series (--save-trajectories)
     std::string states_prefix;              // ... to <states_prefix>_states.csv (a sweep point's own prefix)
 };
 
@@ -126,6 +127,9 @@ inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec
     TaskParams t;
     t.task = task;
     t.save_states = o.flag("save-states", false);
+    t.save_trajectories = o.flag("save-trajectories", false);
+    if (t.save_trajectories && task != "ensemble")
+        throw OptionError("--save-trajectories is for --task ensemble with a time series (--every or --log-times)");
     auto positive = [&o](const std::string& key, long long fallback) {
         const long long v = o.integer(key, fallback);
         if (v < 1) throw OptionError("option --" + key + " must be >= 1");
@@ -169,6 +173,8 @@ inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec
         for (const auto& n : t.observables)
             if (is_two_time(n) && t.times.empty())
                 throw OptionError("observable " + n + " needs an ensemble time series: add --every or --log-times");
+        if (t.save_trajectories && t.times.empty())
+            throw OptionError("--save-trajectories is for --task ensemble with a time series (--every or --log-times)");
         if (t.correlation && t.times.empty())
             throw OptionError("--correlation in an ensemble needs a time series: add --every or --log-times");
     } else {   // stationary
@@ -296,9 +302,20 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
         if (!is_two_time(name)) final_names.push_back(name);
     std::vector<typename Ensemble<T>::FinalObservable> obs;
     for (const auto& name : final_names) obs.push_back(make_observable<T>(name, s.model, false, ctx));
-    // Hidden last observable: did the replica end absorbed (consensus, or
-    // convergence for continuous models) rather than at the step cap?
+    // Hidden observables after the requested ones: did the replica end absorbed
+    // (consensus, or convergence for continuous models) rather than at the step
+    // cap? And, for majority rule, when did it freeze: the time of its last
+    // opinion change, in the run's unit (the sweep it happened in, so a
+    // consensus run gives its stop time); NaN if it hit the cap.
     obs.push_back([](const Model<T>& m) { return m.is_absorbing_state() ? 1.0 : 0.0; });
+    const bool majority = s.model.name == "majority";
+    if (majority)
+        obs.push_back([sweeps = t.sweeps_unit](const Model<T>& m) {
+            if (!m.is_absorbing_state()) return std::nan("");
+            const long long u = static_cast<const MajorityModel<T>&>(m).last_change_update();
+            const long long n = static_cast<long long>(m.get_graph().size());
+            return static_cast<double>(sweeps ? (u + n - 1) / n : u);
+        });
 
     typename Ensemble<T>::Hooks hooks;
     const std::size_t R = static_cast<std::size_t>(t.replicas);
@@ -349,9 +366,13 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
     // Continuous opinions: keep each replica's final clusters.
     std::vector<std::vector<OpinionCluster>> clusters(R);
     const bool keep_clusters = is_continuous(s.model.name) && !prefix.empty();
+    // Discrete opinions with a domain observable: keep each replica's final domains.
+    const bool keep_domains = !is_continuous(s.model.name) && !prefix.empty() &&
+                              std::any_of(t.observables.begin(), t.observables.end(), is_domain_observable);
+    std::vector<DomainStats> domains(keep_domains ? R : 0);
     std::vector<std::vector<T>> finals(t.save_states ? R : 0);   // --save-states, by replica
-    if (series || keep_clusters || t.save_states)
-        hooks.finish = [&, series, keep_clusters](int replica, const Model<T>& m) {
+    if (series || keep_clusters || keep_domains || t.save_states)
+        hooks.finish = [&, series, keep_clusters, keep_domains](int replica, const Model<T>& m) {
             const std::size_t r = static_cast<std::size_t>(replica);
             if (t.save_states)
                 finals[r] = m.get_graph().states();
@@ -359,6 +380,8 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
                 for (std::size_t o = 0; o < O; ++o) slot(r, recorded[r], o) = replica_obs[r][o](m);
                 if (t.correlation) curves[r * K + recorded[r]] = curve_of(m);
             }
+            if constexpr (std::is_integral<T>::value)
+                if (keep_domains) domains[r] = find_domains(m.get_graph());
             if (keep_clusters) {
                 const auto& xs = m.get_graph().states();
                 clusters[r] = opinion_clusters(std::vector<double>(xs.begin(), xs.end()), 1e-3);
@@ -372,8 +395,9 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
         if (verbose)
             std::cout << "Final states written to " << path_for(t.states_prefix, "states") << " (one column per replica)\n";
     }
-    const std::vector<double>& absorbed_flags = r.final_observables.back();
-    obs.pop_back();
+    const std::vector<double>& absorbed_flags = r.final_observables[final_names.size()];
+    const std::vector<double> freeze_times = majority ? r.final_observables[final_names.size() + 1] : std::vector<double>();
+    obs.resize(final_names.size());
     int absorbed = 0;
     for (double a : absorbed_flags) absorbed += a > 0.5 ? 1 : 0;
     const std::string unit = t.sweeps_unit ? "sweeps" : "updates";
@@ -385,6 +409,19 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
                {"sd_consensus_time", r.stddev_consensus_time},
                {"median_consensus_time", r.median_consensus_time},
                {"mean_consensus_time_lower_bound", r.mean_consensus_time_lower_bound}};
+    double mean_freeze = std::nan(""), sd_freeze = std::nan("");
+    if (majority) {   // over the absorbed replicas
+        double sum = 0.0, sum2 = 0.0;
+        int count = 0;
+        for (double v : freeze_times)
+            if (!std::isnan(v)) { sum += v; sum2 += v * v; ++count; }
+        if (count > 0) {
+            mean_freeze = sum / count;
+            sd_freeze = std::sqrt(std::max(0.0, sum2 / count - mean_freeze * mean_freeze));
+        }
+        row.push_back({"mean_freeze_time", mean_freeze});
+        row.push_back({"sd_freeze_time", sd_freeze});
+    }
     if (!s.init.multi && !is_continuous(s.model.name) && !r.first_passage) row.push_back({"exit_prob_up", r.exit_prob_up});
     int reached_threshold = 0;
     double sum_threshold = 0.0;
@@ -406,11 +443,13 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
 
     if (!prefix.empty()) {
         std::vector<std::string> header = {"replica", "reached_consensus", "absorbed", "stop_time"};
+        if (majority) header.push_back("freeze_time");
         if (use_threshold) header.push_back("threshold_time");
         header.insert(header.end(), final_names.begin(), final_names.end());
         CsvWriter rep(path_for(prefix, "replicas"), header);
         for (int i = 0; i < r.replicas; ++i) {
             std::vector<double> values = {static_cast<double>(r.reached[i]), absorbed_flags[i], static_cast<double>(r.stop_times[i])};
+            if (majority) values.push_back(freeze_times[static_cast<std::size_t>(i)]);
             if (use_threshold) values.push_back(static_cast<double>(threshold_times[static_cast<std::size_t>(i)]));
             for (std::size_t k = 0; k < obs.size(); ++k) values.push_back(r.final_observables[k][i]);
             rep.row_values(std::to_string(i), values);
@@ -419,6 +458,18 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
             CsvWriter cl(path_for(prefix, "clusters"), {"replica", "position", "size", "min", "max"});
             for (std::size_t i = 0; i < clusters.size(); ++i)
                 for (const OpinionCluster& c : clusters[i]) cl.row(i, c.position, c.size, c.min, c.max);
+        }
+        if (keep_domains) {   // one row per domain of each final state, largest first
+            std::vector<std::string> dh = {"replica", "size"};
+            if (s.context.periodic) dh.push_back("wraps");
+            CsvWriter dw(path_for(prefix, "domains"), dh);
+            for (std::size_t i = 0; i < domains.size(); ++i)
+                for (const Domain& d : domains[i].domains) {
+                    if (s.context.periodic)
+                        dw.row(i, d.size, d.wraps);
+                    else
+                        dw.row(i, d.size);
+                }
         }
         if (!r.fixation_counts.empty()) {
             CsvWriter fix(path_for(prefix, "fixation"), {"opinion", "replicas", "probability"});
@@ -467,6 +518,18 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
             }
             csv.row_values(std::to_string(grid[k]), values);
             printed.push_back(means);
+        }
+        if (t.save_trajectories && !prefix.empty()) {
+            std::vector<std::string> traj_header = {"replica", "time"};
+            traj_header.insert(traj_header.end(), t.observables.begin(), t.observables.end());
+            CsvWriter traj(path_for(prefix, "trajectories"), traj_header);
+            for (std::size_t i = 0; i < R; ++i)
+                for (std::size_t k = 0; k < K; ++k) {
+                    std::vector<double> values = {static_cast<double>(grid[k])};
+                    for (std::size_t o = 0; o < O; ++o) values.push_back(slot(i, k, o));
+                    traj.row_values(std::to_string(i), values);
+                }
+            if (verbose) std::cout << "Every replica's time series in " << path_for(prefix, "trajectories") << '\n';
         }
         if (verbose) {
             std::cout << "Time series (mean over all " << R << " runs; absorbed runs keep their final value):\n"
@@ -539,6 +602,9 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
                 std::cout << '\n';
             }
         }
+        if (majority && !std::isnan(mean_freeze))
+            std::cout << "Freezing time (" << unit << ", last opinion change; over absorbed replicas): mean " << fmt(mean_freeze)
+                      << ", sd " << fmt(sd_freeze) << '\n';
         if (use_threshold)
             std::cout << "Largest opinion share reached " << fmt(t.threshold, 4) << ": " << reached_threshold << " replicas ("
                       << fmt(100.0 * reached_threshold / r.replicas, 4) << "%)"
@@ -554,6 +620,7 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
         if (!prefix.empty())
             std::cout << "Per-replica data written to " << path_for(prefix, "replicas")
                       << (is_continuous(s.model.name) ? ", final clusters to " + path_for(prefix, "clusters") : std::string())
+                      << (keep_domains ? ", final domains to " + path_for(prefix, "domains") : std::string())
                       << (r.fixation_counts.empty() ? "" : ", fixation counts to " + path_for(prefix, "fixation")) << '\n';
     }
     return row;

@@ -33,7 +33,7 @@ inline const std::vector<Entry>& model_catalog() {
          {{"noise", "x", "required", "probability of a spontaneous random opinion"},
           {"opinions", "q", "2", "number of opinions (2 = +/-1, else 0..q-1)"}}},
         {"majority", "adopt the neighbourhood majority (plurality)",
-         {{"tie", "random|keep", "random", "tie rule (keep = zero-temperature Glauber)"}}},
+         {{"tie", "random|keep", "random", "tie rule (random = zero-temperature Glauber)"}}},
         {"qvoter", "adopt the opinion of q unanimous neighbours; nonconformity with prob p",
          {{"q", "n", "required", "panel size"},
           {"p", "x", "0", "nonconformity probability"},
@@ -123,6 +123,7 @@ inline const std::vector<OptionDoc>& task_options() {
         {"correlation", "true|false", "false", "write the spatial correlation G(r) to prefix_correlation.csv (lattices; ensembles need a time series)"},
         {"save-states", "true|false", "false", "write the final opinion of every node to prefix_states.csv (one column per replica or chain; "
                                                "loads back with --init file; ensembles hold N x replicas values in memory)"},
+        {"save-trajectories", "true|false", "false", "ensemble: write every replica's time series to prefix_trajectories.csv (needs --every or --log-times)"},
         {"sweep", "key=v1,v2,... | key=start:stop:step", "", "repeat the ensemble or stationary task for each value of a parameter"},
         {"sweep2", "key=v1,v2,... | key=start:stop:step", "", "with --sweep: a second parameter; runs every combination (--sweep outer), "
                                                        "e.g. --sweep dims=16x16,32x32 --sweep2 temperature=2.2:2.3:0.01"},
@@ -174,6 +175,11 @@ inline const std::vector<OptionDoc>& observable_docs() {
         {"entropy", "", "", "Shannon entropy of the opinion shares (discrete)"},
         {"effective_opinions", "", "", "effective number of opinions exp(entropy) (discrete)"},
         {"segregation", "", "", "1 - rho / rho under random placement: 0 = mixed, 1 = segregated (discrete; 1 at consensus)"},
+        {"domains", "", "", "number of same-opinion domains / N (discrete)"},
+        {"largest_domain", "", "", "largest domain / N (discrete)"},
+        {"mean_domain", "", "", "mean domain size N / domains, in nodes (discrete)"},
+        {"weighted_domain", "", "", "size-weighted mean domain size sum s^2 / N, in nodes (discrete)"},
+        {"stripes", "", "", "1 if a domain winds around the torus in some but not all directions (periodic lattices, discrete)"},
         {"variance", "", "", "variance of the opinions"},
         {"bimodality", "", "", "Sarle's bimodality coefficient of the opinions (> 5/9: two peaks)"},
     };

@@ -56,6 +56,10 @@ job hk --model hk --graph complete --n 1000 --task ensemble --replicas 100 --ste
     --observables clusters,largest_cluster --sweep epsilon=0.1,0.15,0.18,0.2,0.22,0.25,0.3 \
     --threads $TH --seed 13
 
+# ---- J. majority rule (zero-temperature Glauber) on a 32x32 torus: frozen stripes
+job majority_stripes --model majority --dims 32x32 --task ensemble --replicas 2000 --steps 200000 \
+    --observables stripes,domains,largest_domain --threads $TH --seed 14
+
 # ---- H. coarsening and ageing on 256x256
 job coarsen_ising --model ising --temperature 1.5 --dims 256x256 --init random --task ensemble --replicas 40 \
     --steps 2000 --log-times --tw 10,30,100 --observables length,rho,abs_m,autocorrelation --correlation \

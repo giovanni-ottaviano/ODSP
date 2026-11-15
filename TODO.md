@@ -125,10 +125,12 @@ domains, activity, correlations) gain most once the ensemble-averaged time
 series above exists.
 
 ### Coarsening and ordering
-- **Domain statistics (M).** Number of domains, largest domain, mean size and
-  size distribution, where a domain is a connected group of same-opinion
-  nodes (union-find). Real spatial ordering beyond the global m and ρ; key for
-  majority-rule freezing and for Axelrod.
+- ~~**Domain statistics (M).**~~ Done 2026-10-31: `Domains.hpp`, observables
+  `domains`, `largest_domain`, `mean_domain`, `weighted_domain`, `stripes`
+  (wrap counts on periodic lattices), `prefix_domains.csv`, exact frozen-state
+  detection for majority rule with `freeze_time`. Original note: Number of
+  domains, largest domain, mean size and size distribution (union-find); key
+  for majority-rule freezing and for Axelrod.
 - ~~**Persistence (S).**~~ Done 2026-10-04: Model::persistence(), observable `persistence`.
 - ~~**Two-time autocorrelation C(t, t_w) (M).**~~ Done 2026-10-05: observables `autocorrelation`, `overlap` with `--tw`.
 - ~~**Spatial correlation function and correlation length (M, lattices).**~~ Done 2026-10-05: `Correlations.hpp`, observable `length`, `stationary` ξ and ξ/L, `--correlation` curves.
@@ -157,9 +159,10 @@ series above exists.
   `--noise`) for finite-size scaling; today a sweep varies one option.
 - **Replica offset (S).** `--first-replica k`, so the replicas of one ensemble
   can be split across cluster job arrays and merged reproducibly.
-- **Plotting and analysis scripts (M).** Time series, sweep tables with error
-  bars, Binder crossings, data collapse. Needs the analysis environment you use
-  (the system Python here has no numpy/matplotlib).
+- ~~**Plotting and analysis scripts (M).**~~ Done 2026-11-13: `odspy`
+  (`python/odspy`; see README, "Analysis and figures"). Original note: Time
+  series, sweep tables with error bars, Binder crossings, data collapse. Needs
+  the analysis environment you use (the system Python here has no numpy/matplotlib).
 - ~~**Save final states (S).**~~ Done 2026-10-17: `--save-states true` writes
   `prefix_states.csv` (per replica / chain / sweep point), which loads back
   with `--init file`. A first step towards checkpointing (no RNG state).

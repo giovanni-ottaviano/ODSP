@@ -141,6 +141,10 @@ odsp --model deffuant --epsilon 0.2 --graph complete --n 1000 --task ensemble --
   replica) or `--init-fill <opinion>` fills them; entries for nodes not in the
   graph are counted and skipped. Every replica starts from the file, and
   `--zealots` still applies on top.
+- **Saving trajectories**: `--save-trajectories true` (ensemble with
+  `--every` or `--log-times`, and `--csv prefix`) writes every replica's time
+  series to `prefix_trajectories.csv` (`prefix_point<i>_trajectories.csv` in
+  sweeps): columns `replica,time,<observables>`, replicas outer, times inner.
 - **Saving states**: `--save-states true` (with `--csv prefix`) writes the
   final opinion of every node to `prefix_states.csv`, exactly, named as
   above (edge-list label or index): one column for `run`, one per replica
@@ -302,6 +306,34 @@ sweep (Monte Carlo step) is N updates.
   `--correlation` writes the G(r) curves: per recording time (`run`),
   averaged over replicas (`ensemble` time series) or over samples
   (`stationary`).
+- **Domains and freezing** (`Domains.hpp`, discrete opinions, any graph): a
+  domain is a maximal group of same-opinion nodes connected through
+  same-opinion edges, found by union-find in O(N·degree) at each reading.
+  Observables `domains` (number of domains / N), `largest_domain` (its share
+  of the nodes), `mean_domain` (N / domains) and `weighted_domain` (Σ s² / N,
+  both in nodes). On a periodic lattice each domain also gets a wrap count, the
+  number of independent directions it winds around the torus (droplet 0,
+  stripe 1, the sea around droplets or consensus D); `stripes` is 1 when some
+  domain wraps in some but not all directions (diagonal stripes included,
+  droplets in a sea excluded). An `ensemble` with a CSV prefix and a domain
+  observable writes `prefix_domains.csv`: one row per domain of each final
+  state (`replica,size`, plus `wraps` on periodic lattices), largest first.
+
+  Majority rule recognises **frozen** states exactly: no unfrozen node can
+  change (random ties: every node's opinion is the unique plurality of its
+  neighbours; `--tie keep`: it is among the tied leaders). The check runs only
+  after a sweep without changes, so a frozen run stops exactly one sweep (or N
+  updates with `--time-unit updates`) after its last flip and counts as
+  absorbed. Its `freeze_time` (in `prefix_replicas.csv`, with
+  `mean_freeze_time`/`sd_freeze_time` in the summary; majority only) is the
+  time of the last flip, while `stop_time` is when the run stopped. The
+  frozen-stripe probability is the fraction of replicas with `absorbed = 1`
+  **and** `stripes = 1`: with random ties, diagonal stripes have `stripes = 1`
+  but never freeze, so the mean of `stripes` alone can be slightly higher.
+
+  ```
+  odsp --model majority --dims 64x64 --task ensemble --replicas 500 --steps 200000 --observables stripes,domains,largest_domain --csv mr
+  ```
 - **Active-link density** `rho`: fraction of edges joining disagreeing nodes.
   It tracks coarsening (for the voter model `m` is conserved on average while
   `rho` decays) and `rho = 0` exactly at consensus.
@@ -352,6 +384,106 @@ states faster than by scanning, override `count_neighbours_in_state` and
 `neighbour_state_counts` as well (see `CompleteGraph.hpp`). The active-link
 bookkeeping assumes an undirected graph without self-loops or repeated
 neighbours.
+
+## Analysis and figures (odspy)
+
+`python/odspy` turns the CSV files of `odsp --csv PREFIX` into figures and
+evaluations (fits, Binder crossings, data collapse). It needs Python 3.10+ with
+numpy, scipy and matplotlib (no pandas):
+
+    python3 -m venv python/.venv && python/.venv/bin/pip install -e 'python[dev]'
+    python/.venv/bin/pytest python/tests -q     # tests (they run bin/odsp: `make` first)
+
+Every command prints a text report (files read, figures written, the numbers,
+every warning under `Warnings:`), saves it into `--out DIR` (default: the
+prefix's folder) under a name of its own, so the commands do not overwrite each
+other's reports: `<prefix>_report.txt` (plot), `<prefix>_fit_<y>_report.txt`,
+`<prefix>_crossings_<column>_report.txt`, `<prefix>_collapse_<column>_report.txt`;
+figures go to the same folder as PDF and PNG. Malformed input gives
+`odspy: error: <message>` on stderr and exit status 2; an evaluation flagged poor
+is reported, not an error (exit 0); a figure that cannot be drawn is skipped and
+named under `Warnings:`; any other failure is a bug, reported as
+`odspy: internal error: ...` with exit status 3.
+
+    # every standard figure that applies ("plot" is implied); a single ensemble
+    # or stationary run also gets the driver's summary recomputed from its files
+    odsp --model voter --dims 16x16 --task ensemble --log-times 5 --replicas 24 \
+         --observables rho,length --save-trajectories true --csv out/ens
+    python/.venv/bin/odspy out/ens
+
+    # Binder crossings between consecutive system sizes
+    odsp --model ising --task stationary --sweep dims=8x8,12x12,16x16 \
+         --sweep2 temperature=2.1:2.4:0.05 --replicas 4 --samples 200 --csv out/st
+    python/.venv/bin/odspy crossings out/st --column binder --boot 2000
+
+    # fits: a time series against time (bootstrap over replicas) ...
+    python/.venv/bin/odspy fit out/ens --x time --y length --range 2:40 --model power
+    # ... or the mean consensus time against system size (several runs or one dims sweep)
+    python/.venv/bin/odspy fit out/es --y mean_consensus_time --censored median
+
+    # data collapse, with the given parameters or searching from them
+    python/.venv/bin/odspy collapse out/st --column binder --xc 2.269 --nu 1 --a 0
+    python/.venv/bin/odspy collapse out/st --column binder --xc 2.269 --nu 1 --search --fix-a
+
+Options: `plot [--per-point]`; `crossings --column --size auto|L|N --boot`;
+`fit --x --y --range lo:hi --model power|power+c|log|line --unweighted --censored
+exclude|median --size --boot`; `collapse --column --xc --nu --a --search --fix-a
+--size --boot`. Size is the lattice side `L` (square or cubic dims) or the node
+count `N`, as the files say (`--size` overrides).
+
+The suite never looks more certain than the data is:
+
+- error bars say what they are (caption and legend: standard error, jackknife
+  over blocks or chains, binomial); a fraction at 0 or 1, where the binomial
+  error √(p(1−p)/R) is 0, is printed without ± and drawn with its 95% Wilson
+  interval; where the driver's files cannot give a number the report says "not
+  recoverable from the files: ...";
+- runs that froze without consensus never reach it: the survival curve of the
+  replicas figure levels off at their fraction (only runs that hit the cap are
+  censored), and the lower bound on the mean consensus time counts every
+  unfinished run at the cap, as the driver does;
+- for a model that can leave consensus (noisy voter, Ising/Potts at T > 0,
+  q-voter with p > 0, majority vote with noise: replicas reached consensus and
+  none was ever absorbed; a bounded-confidence run that reached consensus in its
+  last sweep, before being marked absorbed, does not count) the replicas file holds the cap, not the first-passage
+  time: the ensemble summary lists the first-passage times as "not recoverable
+  from the files" (consensus_fraction, reached at least once, and the final
+  values stay), the stop-time histogram and survival curve are skipped with a
+  warning, and `fit --censored median` is refused; `fit --censored exclude` uses
+  the driver's sweep means and labels them first-passage times;
+- a mean consensus time with `consensus_fraction < 1` is a censored mean, biased
+  low: `fit` excludes the point and names it (`--censored median` uses the
+  driver's median instead, which needs the per-point replicas files);
+- a fit to an ensemble time series has correlated points, so a plain chi^2 means
+  nothing. With `--save-trajectories true` the errors come from a bootstrap over
+  whole replicas and the goodness of fit from the replica covariance (Hotelling's
+  T², whose expectation E[T²] is shown; when T² exceeds it the errors are scaled
+  by sqrt(T²/E[T²])); without `prefix_trajectories.csv` the fit is labelled
+  "errors not trustworthy" and no p-value is given. Fits to G(r) and to a single
+  run's time series are labelled the same way (their points share configurations);
+- a fit with p below 0.01 is marked "poor fit"; a collapse with S above 3, too
+  little overlap between sizes, a search that stopped at its overlap limit, or a
+  searched x_c outside the measured x range (an extrapolation), or a searched
+  optimum held by the grid (x_c on a measured x value, within 1e-4 of the x span,
+  with more than 2 pairs of scaled points of different sizes coinciding, |ΔX| < 1e-6
+  of the X span: L^(1/nu) commensurate, S jumps there and describes the grid; try
+  another start) is
+  marked "POOR COLLAPSE" and its parameter errors are withheld (also when the
+  bootstrap spread is degenerate, or when more than 20% of the bootstrap
+  re-minimisations fail, ending pinned on the grid counting as a failure);
+- a fit refused for too few points names the points it excluded and why;
+- a crossing outside the sampled range is "no crossing in range", never
+  extrapolated; stationary sweeps warn when jackknife blocks are not much longer
+  than the autocorrelation time.
+
+Library entry points (`import odspy`): `find_outputs`, `read_table`, `families`,
+`fit`, `fit_timeseries`, `find_crossings`, `collapse`, `search_collapse`,
+`figures_for` (or `iter_figures`, which yields the figures one at a time so they
+can be saved and closed as they come), `save`, `plot_fit`, `plot_crossings`, `plot_collapse`,
+`summarise_replicas`, `summarise_samples`, `consensus_time_vs_size`, `is_first_passage`,
+`peak_vs_size`, `slope_at_crossing_vs_size`, `log_growth_vs_size`,
+`coarsening_fit`. Each returns plain dataclasses (`FitResult`, `Crossing`,
+`CollapseResult`, ...) whose `warnings` you should read.
 
 ## Tests
 
@@ -408,13 +540,16 @@ what the test suite can afford. It takes about an hour at 10 threads.
 ```
 benchmarks/run_benchmarks.sh               # all jobs, at most 10 threads (THREADS=n to change)
 benchmarks/run_benchmarks.sh 'ising|potts' # only the jobs whose name matches
-python3 benchmarks/analyse.py              # compare with the known values: PASS/FAIL per check
+python/.venv/bin/python benchmarks/analyse.py   # compare with the known values: PASS/FAIL per check
 ```
 
 Jobs run one at a time with fixed seeds. Results, the driver's output and wall
 times go to `benchmarks/results/` (not tracked by git). `analyse.py` needs
-only the Python standard library, skips benchmarks that have no results, and
-exits with status 1 if a check fails. Exact results must agree within 3
+the `odspy` package (install it as the "Analysis and figures (odspy)" section
+describes, then run it with `python/.venv/bin/python`), skips benchmarks that
+have no results, and exits with status 1 if a check fails. It also prints
+`info:` lines with the suite's statistics (bootstrap errors of the crossings,
+time-series exponents with their trust label); they never change a verdict. Exact results must agree within 3
 standard errors; asymptotic ones also allow for the finite-size corrections
 expected at these sizes.
 
@@ -438,6 +573,12 @@ What is checked:
   - p_c = (q−1)/(q−1+2^(q−1)) for q = 3, 4.
   - The mean-field Binder value 0.2705 at p_c.
   - The mean-field |m| in the ordered phase.
+- **Majority rule freezing.** On a periodic 32² lattice with random ties
+  (zero-temperature Glauber), the fraction of runs frozen in stripes. Its
+  L → ∞ limit is the exact 0.3388 (Barros, Krapivsky & Redner, PRE 80,
+  040101, 2009), approached slowly from above; the check uses ≈ 0.37 at
+  L = 32, read off Fig. 3 of Olejarz, Krapivsky & Redner (PRL 109, 195702,
+  2012).
 - **Deffuant.** ⌊1/(2ε)⌋ major clusters; complete consensus above ε = ½.
 - **Hegselmann–Krause.** The consensus threshold ε ≈ 0.2 on the complete graph.
 - **Coarsening.**

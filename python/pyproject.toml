@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "odspy"
+version = "0.1.0"
+description = "Analysis tools for ODSP opinion-dynamics simulation outputs"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "matplotlib"]
+
+[project.scripts]
+odspy = "odspy.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["odspy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,18 +1,25 @@
 """Compare the benchmark results with known values.
 
-    python3 benchmarks/analyse.py [results-dir]
+    python/.venv/bin/python benchmarks/analyse.py [results-dir]
 
 Prints every measured value next to the exact or literature value and a
 PASS/FAIL verdict for each check, then a summary; exits with status 1 if any
-check fails. Benchmarks whose results are missing are skipped. Python standard
-library only.
+check fails. Benchmarks whose results are missing are skipped. Needs the odspy
+package (python/, installed in python/.venv). Lines prefixed "info:" give the
+statistics of the odspy suite (bootstrap crossing errors, time-series exponents);
+they never change a verdict.
 
 Tolerances: exact results must agree within 3 standard errors; asymptotic
 results also allow for the finite-size corrections expected at these sizes
 (stated next to each check).
 """
-import csv, glob, math, os, re, sys
+import glob, math, os, re, sys
 from collections import defaultdict
+
+import numpy as np
+
+import odspy
+from odspy.sizes import SizeCurve
 
 R = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 results = []   # (section, description, ok)
@@ -20,18 +27,10 @@ section = ""
 
 
 def read(name):
-    with open(os.path.join(R, name)) as f:
-        rows = [l for l in f if not l.startswith("#")]
-    out = []
-    for r in csv.DictReader(rows):
-        d = {}
-        for k, v in r.items():
-            try:
-                d[k] = float(v)
-            except (TypeError, ValueError):
-                d[k] = v
-        out.append(d)
-    return out
+    """Rows as {column: float, or str for text columns}, in file order."""
+    t = odspy.read_table(os.path.join(R, name))
+    cols = {k: t.columns[k].tolist() for k in t.names}
+    return [{k: cols[k][i] for k in t.names} for i in range(len(t))]
 
 
 def have(name):
@@ -55,17 +54,49 @@ def check_near(desc, x, ref, err=0.0, sigmas=3.0, slack=0.0):
     check(f"{desc}: {x:.5g} vs {ref:.5g} (tol {sigmas * err + slack:.2g}{zs})", abs(x - ref) <= sigmas * err + slack)
 
 
-def crossings(tables, xkey, ykey):
-    """tables: {L: rows}; crossing of y_L(x) and y_2L(x) by linear interpolation."""
-    Ls = sorted(tables)
-    out = []
-    for a, b in zip(Ls, Ls[1:]):
-        xa = [r[xkey] for r in tables[a]]
-        da = [r[ykey] - s[ykey] for r, s in zip(tables[a], tables[b])]
-        for i in range(len(xa) - 1):
-            if da[i] == 0 or da[i] * da[i + 1] < 0:
-                out.append((a, b, xa[i] - da[i] * (xa[i + 1] - xa[i]) / (da[i + 1] - da[i])))
-    return out
+crossings = odspy.crossings_plain
+
+
+N_BOOT = 200   # bootstrap draws of the information-only crossing errors
+
+
+def info(text):
+    print("    info: " + text)
+
+
+def info_crossings(tables, xkey, ykey, size_label):
+    """Bootstrap crossing errors of odspy.find_crossings; information only, never a check."""
+    curves = []
+    for size, rows in sorted(tables.items()):
+        col = lambda k: np.array([r[k] for r in rows], float)
+        curves.append(SizeCurve(float(size), size_label, col(xkey), col(ykey), col(ykey + "_err"),
+                                xkey, ykey, "benchmark"))
+    if len(curves) < 2:
+        return
+    try:
+        found = odspy.find_crossings(curves, n_boot=N_BOOT, seed=0)
+    except odspy.InputError as e:
+        info(f"{ykey} crossings not assessed: {e}")
+        return
+    for c in found:
+        if c.found:
+            info(f"{ykey} crossing {size_label}={c.size_a:g}/{c.size_b:g}: {xkey} = {c.x:.5g} +- {c.err:.2g}"
+                 f" (bootstrap, {c.n_boot} draws)")
+        else:
+            info(f"{ykey} crossing {size_label}={c.size_a:g}/{c.size_b:g}: {c.note}")
+
+
+def info_exponent(ts_name, observable, xrange):
+    """Time-series exponent of odspy.fit_timeseries with its label; information only."""
+    try:
+        r = odspy.fit_timeseries(odspy.read_table(os.path.join(R, ts_name)), observable, model="power",
+                                 xrange=xrange)
+    except odspy.InputError as e:
+        info(f"{observable} exponent not assessed: {e}")
+        return
+    label = r.warnings[-1] if r.warnings else r.method
+    info(f"{observable} power-law exponent, t = {xrange[0]:g}..{xrange[1]:g}: "
+         f"{r.params['b']:.4g} +- {r.errors['b']:.2g}  [{label}]")
 
 
 def dims_N(r):
@@ -177,6 +208,7 @@ def check_crossings(tables, xkey, ref, tol):
     for key in ("binder", "xi_over_L"):
         for a, b, x in crossings(tables, xkey, key):
             check_near(f"crossing of {key} L={a}/{b}", x, ref, slack=tol)
+        info_crossings(tables, xkey, key, "L")
 
 
 def at(rows, key, x):
@@ -258,6 +290,7 @@ for q, pc, deep in ((3, 1 / 3, 0.2), (4, 3 / 11, 0.15)):
     for a, b, x in crossings(near, "p", "binder"):
         if a >= 2000:
             check_near(f"Binder crossing N={a}/{b}", x, pc, slack=0.003)
+    info_crossings(near, "p", "binder", "N")
     if 8000 in tabs:
         r = at(tabs[8000], "p", pc)
         check_near("N=8000 U(p_c)", r["binder"], 0.2705, r["binder_err"], slack=0.01)
@@ -292,6 +325,21 @@ if have("deffuant_sweep.csv"):
         if eps >= 0.5:
             check(f"eps={eps} P(complete consensus) = {one:.2f} > 0.9", one > 0.9)
 
+if have("majority_stripes_replicas.csv"):
+    head("J. Majority rule (random ties = zero-temperature Glauber), 32x32 torus: P(frozen in stripes) -> 0.3388 as"
+         "\n   L -> infinity (Barros, Krapivsky & Redner 2009), approached slowly from above: ~0.37 at L = 32 for this"
+         "\n   dynamics (Olejarz, Krapivsky & Redner, PRL 109, 195702, 2012, Fig. 3; read off the plot, +-0.01)")
+    reps = read("majority_stripes_replicas.csv")
+    nrep = len(reps)
+    absorbed = sum(1 for r in reps if r["absorbed"] == 1)
+    frozen_stripes = sum(1 for r in reps if r["absorbed"] == 1 and r["stripes"] == 1)
+    p = frozen_stripes / nrep
+    print(f"    replicas={nrep}  absorbed={absorbed}  frozen in stripes={frozen_stripes}  "
+          f"mean stripes={sum(r['stripes'] for r in reps) / nrep:.4f}")
+    check(f"absorbed fraction {absorbed / nrep:.4f} >= 0.99 (frozen or consensus within the cap)", absorbed / nrep >= 0.99)
+    check_near("P(frozen in stripes) at L = 32", p, 0.37, err=math.sqrt(0.37 * (1 - 0.37) / nrep), slack=0.01)
+    check(f"P(frozen in stripes) {p:.4f} above the L -> infinity limit 0.3388", p > 0.3388)
+
 if have("hk_sweep.csv"):
     head("G. Hegselmann-Krause, complete graph N=1000: consensus for eps above ~0.2 (Fortunato 2005)")
     for r, (major, total, one) in zip(read("hk_sweep.csv"), cluster_stats("hk")):
@@ -307,15 +355,8 @@ def columns(rows):
     return {k: [r[k] for r in rows] for k in rows[0]}
 
 
-def slope(xs, ys):
-    pts = [(math.log(x), math.log(y)) for x, y in zip(xs, ys) if x > 0 and y > 0]
-    n = len(pts); mx = sum(p[0] for p in pts) / n; my = sum(p[1] for p in pts) / n
-    return sum((x - mx) * (y - my) for x, y in pts) / sum((x - mx) ** 2 for x, _ in pts)
-
-
-def window(ts, key, lo, hi):
-    sel = [(t, v) for t, v in zip(ts["time"], ts[key]) if lo <= t <= hi]
-    return [t for t, _ in sel], [v for _, v in sel]
+def slope(xs, ys, lo=None, hi=None):
+    return odspy.plain_loglog_slope(xs, ys, None if lo is None else (lo, hi))
 
 
 def near_ratio(ts, key, tw, ratio):
@@ -334,10 +375,11 @@ if have("coarsen_ising_timeseries.csv"):
     u = -1 / math.tanh(2 * K) * (1 + 2 / math.pi * (2 * math.tanh(2 * K) ** 2 - 1) * math.pi / (2 * a))
     rho_eq = (1 + u / 2) / 2   # Onsager: equilibrium density of broken bonds at T = 1.5
     ts["excess_rho"] = [r - rho_eq for r in ts["rho_mean"]]
-    sL = slope(*window(ts, "length_mean", 20, 2000))
-    sR = slope(*window(ts, "excess_rho", 20, 2000))
+    sL = slope(ts["time"], ts["length_mean"], 20, 2000)
+    sR = slope(ts["time"], ts["excess_rho"], 20, 2000)
     check_near("d ln L / d ln t, t = 20..2000 (effective, approaches 1/2 from below)", sL, 0.5, slack=0.08)
     check_near(f"d ln(rho - rho_eq) / d ln t (rho_eq = {rho_eq:.5f})", sR, -0.5, slack=0.08)
+    info_exponent("coarsen_ising_timeseries.csv", "length", (20, 2000))
     prod = [L * e for t, L, e in zip(ts["time"], ts["length_mean"], ts["excess_rho"]) if 20 <= t <= 2000]
     check(f"L (rho - rho_eq) constant within 15%: {min(prod):.3f}..{max(prod):.3f}", max(prod) / min(prod) < 1.15)
     for ratio in (2, 5, 10, 20):
@@ -357,8 +399,9 @@ if have("coarsen_voter_timeseries.csv"):
     t, rho = [(t, r) for t, r in zip(ts["time"], ts["rho_mean"]) if t <= 10000][-1]
     check_near(f"rho(t = {t:g})", rho, math.pi / (2 * math.log(t) + math.log(256)),
                slack=0.1 * math.pi / (2 * math.log(t) + math.log(256)))
-    print(f"    apparent exponent of L_1/2, t = 100..10000: {slope(*window(ts, 'length_mean', 100, 10000)):.3f}"
+    print(f"    apparent exponent of L_1/2, t = 100..10000: {slope(ts['time'], ts['length_mean'], 100, 10000):.3f}"
           "  (G(r,t) ~ 1 - ln r^2 / ln t suggests t^(1/4) asymptotically)")
+    info_exponent("coarsen_voter_timeseries.csv", "length", (100, 10000))
 
 
 # --------------------------------------------------------------------- summary

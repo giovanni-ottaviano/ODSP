@@ -443,12 +443,18 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
 
     if (!prefix.empty()) {
         std::vector<std::string> header = {"replica", "reached_consensus", "absorbed", "stop_time"};
+        // A model that can leave consensus runs every replica to the cap, so stop_time is the
+        // cap: write when consensus was first reached (NaN if never) next to it.
+        if (r.first_passage) header.push_back("consensus_time");
         if (majority) header.push_back("freeze_time");
         if (use_threshold) header.push_back("threshold_time");
         header.insert(header.end(), final_names.begin(), final_names.end());
         CsvWriter rep(path_for(prefix, "replicas"), header);
-        for (int i = 0; i < r.replicas; ++i) {
+        for (int i = 0, j = 0; i < r.replicas; ++i) {
             std::vector<double> values = {static_cast<double>(r.reached[i]), absorbed_flags[i], static_cast<double>(r.stop_times[i])};
+            if (r.first_passage)
+                values.push_back(r.reached[i] ? static_cast<double>(r.consensus_times[static_cast<std::size_t>(j++)])
+                                              : std::nan(""));
             if (majority) values.push_back(freeze_times[static_cast<std::size_t>(i)]);
             if (use_threshold) values.push_back(static_cast<double>(threshold_times[static_cast<std::size_t>(i)]));
             for (std::size_t k = 0; k < obs.size(); ++k) values.push_back(r.final_observables[k][i]);

@@ -1,18 +1,15 @@
-import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
-
-from odspy import find_crossings, find_outputs, fit, fit_timeseries, search_collapse  # noqa: E402
-from odspy.collapse import collapse  # noqa: E402
-from odspy.io import Provenance  # noqa: E402
-from odspy.plots import plot_collapse, plot_crossings, plot_fit, save  # noqa: E402
-from test_collapse import NU, XC, scaling_curves  # noqa: E402
-from test_crossings import curve, model  # noqa: E402
+from odspy import find_crossings, find_outputs, fit, fit_timeseries, search_collapse
+from odspy.collapse import collapse
+from odspy.io import Provenance
+from odspy.plots import plot_collapse, plot_crossings, plot_fit, save
+from synthetic import NU, XC, curve, scaling_curves
+from synthetic import crossing_model as model
 
 LABEL = "errors not trustworthy: correlated points (rerun with --save-trajectories true)"
 
@@ -126,7 +123,7 @@ def test_crossing_and_collapse_figures(tmp_path):
 
 # --- fix round 1 ------------------------------------------------------------------------------
 
-from odspy.fits import FitResult  # noqa: E402
+from odspy.fits import FitResult
 
 
 def result(**kw):
@@ -233,3 +230,13 @@ def test_hotelling_scaling_drawn():
     plt.close(fig)
     assert "E[T²] = " in j and "errors scaled by sqrt(T²/E[T²])" in j
     assert "sqrt(chi2/dof)" not in j
+
+
+def test_fit_figure_says_which_coordinate_is_hidden():
+    x = np.concatenate([[0.0], np.linspace(1, 10, 11)])         # time zero, as in a time series
+    r = fit(x, 1 + x ** 0.5, np.full(12, 0.05), "power+c")
+    fig = plot_fit(r, "t", "m")
+    text = joined(fig)
+    assert "1 point(s) with x <= 0 not shown on the log x axis" in text
+    assert "y <= 0" not in text
+    plt.close(fig)

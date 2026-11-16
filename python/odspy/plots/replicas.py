@@ -10,14 +10,10 @@ from ..helpers import FIRST_PASSAGE, is_first_passage, replica_times
 from ..io import Table
 from .style import (BINOMIAL, WILSON, binomial_yerr, color, finish, grid, hide_unused, new_fig,
                     numeric)
+from .style import warn as _warn
 
 BOOKKEEPING = ("replica", "reached_consensus", "absorbed", "stop_time", "consensus_time",
                "freeze_time", "stripes")
-
-
-def _warn(warnings, text):
-    if warnings is not None:
-        warnings.append(text)
 
 
 def kaplan_meier(time: np.ndarray, event: np.ndarray):
@@ -120,6 +116,10 @@ def plot_replicas(t: Table, warnings: list[str] | None = None):
         ax.legend(loc="upper right")
         ax = axes[0, 1]
         ts, ss = survival_curve(stop[ok], done[ok], None if absorbed is None else absorbed[ok])
+        if len(ts) and ok.any() and np.max(stop[ok]) > ts[-1]:
+            # flat after the last event, out to the last run's stop: the frozen and censored
+            # markers sit on the line, not beyond its end
+            ts, ss = np.append(ts, np.max(stop[ok])), np.append(ss, ss[-1])
         ax.step(ts, ss, where="post", color=color(0), lw=1.4, label="survival (Kaplan-Meier)")
         if n_frozen:
             fs = stop[ok & frozen]

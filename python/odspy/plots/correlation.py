@@ -7,13 +7,9 @@ import numpy as np
 from ..io import Table
 from .style import (BETWEEN_CHAIN, JACKKNIFE, SE, color, finish, log_axes, masked, new_fig,
                     note_undefined)
+from .style import warn as _warn
 from matplotlib import cm
 from matplotlib.colors import Normalize
-
-
-def _warn(warnings, text):
-    if warnings is not None:
-        warnings.append(text)
 
 
 def plot_correlation(t: Table, warnings: list[str] | None = None):

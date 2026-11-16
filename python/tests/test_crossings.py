@@ -4,22 +4,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from odspy import InputError, SizeCurve, crossings_plain, find_crossings, read_table
+from odspy import InputError, crossings_plain, find_crossings, read_table
+from synthetic import crossing_model as model
+from synthetic import curve
 
 ROOT = Path(__file__).resolve().parents[2]
 METHOD = "linear interpolation, parametric bootstrap (n=2000)"
-
-
-def curve(size, x, y, yerr=0.002):
-    x = np.asarray(x, float)
-    y = np.asarray(y, float)
-    if yerr is not None:
-        yerr = np.full(len(x), yerr) if np.isscalar(yerr) else np.asarray(yerr, float)
-    return SizeCurve(size, "L", x, y, yerr, "temperature", "m", "test")
-
-
-def model(L, x):
-    return 0.6 + 0.05 * (x - 2.27) * L
 
 
 def test_known_crossing():
@@ -231,3 +221,29 @@ def test_duplicate_x_raises_input_error():
     x = np.array([0.0, 1.0, 1.0, 2.0])
     with pytest.raises(InputError, match=r"size 8.*duplicate x.*1"):
         find_crossings([curve(8, x, [0, 1, 2, 3.0]), curve(16, [0.0, 1.0, 2.0], [1, 1, 1.0])])
+
+
+def test_report_groups_several_crossings_of_one_pair():
+    from odspy.crossings import Crossing
+    from odspy.report import crossing_lines
+    m = "linear interpolation"
+    cs = [Crossing(8, 16, 2.20, 0.01, 0.6, True, "", m, 50),
+          Crossing(8, 16, 2.25, 0.02, 0.6, True, "", m, 50),
+          Crossing(16, 32, 2.27, 0.01, 0.6, True, "", m, 50),
+          Crossing(32, 64, math.nan, math.nan, math.nan, False, "no crossing in range", m, 50)]
+    lines = crossing_lines(cs, "L")
+    assert lines[0].startswith("  L=8 vs L=16: the curves cross 2 times")
+    assert "not independent measurements" in lines[0]
+    assert lines[1].startswith("    x = 2.2 ± 0.01") and lines[2].startswith("    x = 2.25 ± 0.02")
+    assert lines[3].startswith("  L=16 vs L=32: x = 2.27 ± 0.01")
+    assert lines[4] == "  L=32 vs L=64: no crossing in range"
+    assert len(lines) == 5
+
+
+def test_crossings_command_notes_correlated_adjacent_pairs(outputs, tmp_path, capsys):
+    from odspy.cli import main
+    from odspy.report import CORRELATED_PAIRS
+    assert main(["crossings", outputs["stat2"], "--column", "binder", "--boot", "50",
+                 "--out", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert CORRELATED_PAIRS in out

@@ -11,11 +11,7 @@ from ..io import Outputs, Table
 from ..sizes import size_of
 from .style import (BINOMIAL, POISSON, SE, WILSON, binomial_yerr, color, finish, grid,
                     hide_unused, log_axes, masked, new_fig, numeric, note_undefined)
-
-
-def _warn(warnings, text):
-    if warnings is not None:
-        warnings.append(text)
+from .style import warn as _warn
 
 
 def _fmt(v) -> str:
@@ -158,9 +154,22 @@ def plot_clusters(t: Table, warnings: list[str] | None = None):
     return [("clusters", finish(fig, t.provenance))]
 
 
+def _first_replica(t: Table) -> int:
+    """Label of the file's first replica: k for runs with --first-replica k, else 0."""
+    try:
+        return int(t.provenance.get("first-replica", "0") or 0)
+    except ValueError:
+        return 0
+
+
+def _replica_positions(t: Table) -> np.ndarray:
+    """Each row's replica as a position 0..R-1 in its own run (labels minus --first-replica)."""
+    return t["replica"].astype(int) - _first_replica(t)
+
+
 def _per_replica_counts(t: Table, R: int, threshold: float):
     counts = np.zeros(R)
-    for r, s in zip(t["replica"].astype(int), t["size"]):
+    for r, s in zip(_replica_positions(t), t["size"]):
         if 0 <= r < R and s >= threshold:
             counts[r] += 1
     return counts
@@ -173,7 +182,7 @@ def _n_replicas(outputs: Outputs, i: int, t: Table) -> int:
     sw = outputs.get("sweep")
     if sw is not None and sw.has("replicas") and len(sw) > i:
         return int(sw["replicas"][i])
-    return int(t["replica"].max()) + 1 if len(t) else 1
+    return int(_replica_positions(t).max()) + 1 if len(t) else 1
 
 
 def plot_clusters_vs_key(outputs: Outputs, warnings: list[str] | None = None):
@@ -283,12 +292,14 @@ def plot_domains_vs_key(outputs: Outputs, warnings: list[str] | None = None):
     nd, nde, lg, lge = [], [], [], []
     for i, t in pts:
         R = _n_replicas(outputs, i, t)
-        reps = t["replica"].astype(int)
+        pos = _replica_positions(t)
+        keep = (pos >= 0) & (pos < R)
+        reps, sizes = pos[keep], t["size"][keep]
         per = np.bincount(reps, minlength=R)[:R].astype(float)
         nd.append(per.mean())
         nde.append(per.std(ddof=1) / math.sqrt(R) if R > 1 else np.nan)
         if N is not None:
-            big = np.array([t["size"][reps == r].max() / N if (reps == r).any() else np.nan
+            big = np.array([sizes[reps == r].max() / N if (reps == r).any() else np.nan
                             for r in range(R)])
             ok = np.isfinite(big)
             lg.append(big[ok].mean() if ok.any() else np.nan)

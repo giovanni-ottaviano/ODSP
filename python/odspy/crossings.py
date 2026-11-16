@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .errors import InputError
+from .errors import InputError, rng_from
 from .sizes import SizeCurve
 
 NO_CROSSING = "no crossing in range"
@@ -190,7 +190,7 @@ def find_crossings(curves: list[SizeCurve], n_boot: int = 2000, seed: int = 0) -
     if len({(c.xkey, c.column) for c in curves}) > 1:
         raise InputError("curves have different x or y columns: "
                          + ", ".join(f"{c.xkey}/{c.column}" for c in curves))
-    rng = np.random.default_rng(seed)
+    rng = rng_from(seed)
     out: list[Crossing] = []
     for a, b in zip(curves, curves[1:]):
         out.extend(_pair(a, b, int(n_boot), rng))

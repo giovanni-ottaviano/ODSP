@@ -248,31 +248,28 @@ blocks use; each was judged safe to leave. Effort S unless noted.
   per reading at 1024^2 in 2D); a per-reading cache would cut that 5x.
 - `MajorityModel::is_absorbing_state()` / `is_frozen_state()` are const but
   write mutable scratch: not safe to call concurrently on one model.
-- A majority replica that starts in consensus reports `stop_time` 1 but
-  `freeze_time` 0.
-- The driver's stdout note "runs did not reach consensus ... true mean >= X"
-  is misleading for majority runs frozen away from consensus (odspy reports
-  them correctly).
 
-### odspy rough edges
-- Report: stationary caveats and "values <= 0 not shown" warnings can appear
-  twice; several crossings for one size pair are listed as independent
-  measurements; "model None" instead of "model unknown" without provenance;
-  `odspy P.csv` for a missing file suggests nothing; a prefix named like a
-  subcommand needs `./`.
-- Statistics wording: the singular-covariance warning also fires on GLS
-  non-convergence; on the bootstrap path a copied "parameter errors could not
-  be estimated" note can sit next to finite errors; adjacent crossing errors
-  are not independent, so a drift error must not combine them as if they were.
-- `stationary_caveats` implements the driver's tau_abs short-block rule but not
-  its sign-change NOTE (block < 10 tau); `summarise_samples` takes the last
-  column as the observable.
-- Library calls with non-data arguments of the wrong type (`p_threshold`,
-  `model`, `seed`) can still raise TypeError; BOM-prefixed CSVs are rejected.
-- Figures: in-axes legends overlap curves in the ensemble time-series panels;
-  the Kaplan-Meier step line ends before the frozen-run markers.
-- Code health: `_warn` duplicated in five plot modules, dead `if False`
-  branches in `plots/sweeps.py`, `__import__` calls in `plots/states.py`; C++
-  test helpers (`run`, `read_csv`) duplicated across driver tests; Python tests
-  import helpers from other test files via `sys.path`; several weak or
-  conditional assertions (listed in the review ledgers).
+### ~~Small cleanup~~ (done 2026-11-16)
+- ~~Driver~~: a replica that starts in consensus stops at time 0 (was 1; the
+  majority `freeze_time` was already 0); the stdout note no longer gives a
+  "true mean >=" bound when runs froze away from consensus (they never reach
+  it), and says which runs hit the cap; `--first-replica k` splits one
+  ensemble across jobs (per-replica files merge into the single run's).
+- ~~odspy report~~: stationary caveats once each, one line per kind naming the
+  points, with the driver's rare-sign-change and chains-disagree checks;
+  several crossings of one pair grouped, adjacent-pair errors noted as
+  correlated; "model unknown" without provenance; missing prefixes get close
+  matches; a prefix named like a command gets a `./` hint; the collapse line no
+  longer repeats "S from n of m".
+- ~~odspy statistics and inputs~~: correlated-fit non-convergence no longer
+  called "singular"; the plain fit's "errors could not be estimated" note is
+  dropped on the bootstrap path; `summarise_samples` takes the configured (or
+  only) observable; wrong-type `p_threshold`, `model`, `unweighted`, `seed` are
+  input errors; BOM-prefixed CSVs read; replica labels from `--first-replica`.
+- ~~Figures~~: one legend above the ensemble time-series panels; the
+  Kaplan-Meier line runs out to the last stop; hidden fit points say whether x
+  or y was <= 0.
+- ~~Code health~~: `warn` shared in `plots/style.py`; dead branches and
+  `__import__` gone; C++ driver-test helpers in `tests/DriverTestHelpers.hpp`;
+  Python synthetic curves in `python/tests/synthetic.py` (no `sys.path`); two
+  conditional assertions made unconditional (one had hidden an untested case).

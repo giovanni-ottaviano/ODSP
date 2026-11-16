@@ -50,8 +50,9 @@ def test_crossings_command(outputs, tmp_path, capsys):
     code, out, err = run(["crossings", outputs["stat2"], "--column", "binder", "--boot", "50",
                           "--out", str(tmp_path)], capsys)
     assert code == 0, err
-    lines = [ln for ln in out.splitlines() if " vs " in ln and ("±" in ln or "no crossing in range" in ln)]
-    assert len(lines) >= 2
+    pairs = [ln for ln in out.splitlines() if ln.startswith("  L=") and " vs " in ln]
+    assert len(pairs) == 2                                    # 8 vs 12, 12 vs 16
+    assert sum("x = " in ln and "±" in ln for ln in out.splitlines()) >= 2
     assert (tmp_path / "stat2_crossings_binder.pdf").exists()
     assert (tmp_path / "stat2_crossings_binder_report.txt").exists()
 
@@ -342,3 +343,24 @@ def test_fit_correlation_close_large_times_are_not_pooled(tmp_path, capsys):
                           "--curve", "99999900", "--out", str(tmp_path / "o")], capsys)
     assert code == 0, err
     assert "time = 99999900" in out and "b = -0.03" in out      # k = 2, not its neighbour
+
+
+def test_prefix_named_like_a_command_gets_a_hint(tmp_path, capsys, monkeypatch):
+    (tmp_path / "fit_sweep.csv").write_text("x,y\n1,2\n")
+    monkeypatch.chdir(tmp_path)
+    code, out, err = run(["fit"], capsys)
+    assert code == 2
+    assert "for the outputs with prefix fit write ./fit" in err
+    code, out, err = run(["fit", "--help"], capsys)
+    assert code == 0 and "write ./fit" not in err
+
+
+def test_different_models_names_a_file_without_provenance(outputs, tmp_path):
+    from odspy import InputError
+    from odspy.sizes import families
+    src = Path(outputs["ens_sweep"] + "_sweep.csv")
+    bare = tmp_path / "bare_sweep.csv"
+    bare.write_text("".join(ln for ln in src.read_text().splitlines(True) if not ln.startswith("#")))
+    with pytest.raises(InputError) as e:
+        families([outputs["ens_sweep"], str(tmp_path / "bare")], "mean_consensus_time")
+    assert "model unknown: no provenance" in str(e.value) and "None" not in str(e.value)

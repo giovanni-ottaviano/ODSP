@@ -209,17 +209,46 @@ def test_stationary_caveats():
                     samples=1000, blocks=20, sweep="temperature=2.0,2.3")
     caveats = stationary_caveats(t)
     short = [c for c in caveats if "jackknife blocks" in c]
-    assert len(short) == 1 and "temperature=2.3" in short[0]
+    assert len(short) == 1 and "at 1 of 2 points (temperature=2.3)" in short[0]
+    assert short[0].startswith("syn_sweep.csv: ") and "tau_abs up to 40" in short[0]
     notes = [c for c in caveats if "uncertain" in c]
-    assert notes == ["error bars from 10 chains are themselves uncertain by about +-24% "
-                     "(more --replicas narrow them)"]
+    assert notes == ["syn_sweep.csv: error bars from 10 chains are themselves uncertain by "
+                     "about +-24% (more --replicas narrow them)"]
+
+
+def test_stationary_caveats_one_line_per_kind():
+    rows = [{"temperature": 2.0 + 0.1 * i, "tau_abs": 40.0, "chains": 4} for i in range(6)]
+    t = sweep_table(rows, samples=1000, blocks=20, sweep="temperature=2.0:2.5:0.1")
+    short = [c for c in stationary_caveats(t) if "jackknife blocks" in c]
+    assert len(short) == 1 and "at all 6 points" in short[0]
+
+
+def test_stationary_caveats_rare_sign_changes():
+    # blocks of 50 samples: long against tau_abs = 2, short against tau = 30
+    t = sweep_table([{"temperature": 2.0, "tau": 30.0, "tau_abs": 2.0, "chains": 1},
+                     {"temperature": 2.5, "tau": 2.0, "tau_abs": 1.0, "chains": 1}],
+                    samples=1000, blocks=20, sweep="temperature=2.0,2.5")
+    caveats = stationary_caveats(t)
+    assert not any("not much longer" in c for c in caveats)
+    sign = [c for c in caveats if "changes sign only rarely" in c]
+    assert len(sign) == 1 and "(temperature=2)" in sign[0] and "plain mean" in sign[0]
+
+
+def test_stationary_caveats_chains_disagree():
+    t = sweep_table([{"temperature": 2.0, "tau_abs": 1.0, "chains": 4, "abs_mean_err": 0.05,
+                      "abs_mean_err_within": 0.01, "binder_err": 0.01, "binder_err_within": 0.01},
+                     {"temperature": 2.5, "tau_abs": 1.0, "chains": 4, "abs_mean_err": 0.01,
+                      "abs_mean_err_within": 0.01, "binder_err": 0.01, "binder_err_within": 0.01}],
+                    samples=1000, blocks=20, sweep="temperature=2.0,2.5")
+    bad = [c for c in stationary_caveats(t) if "disagree" in c]
+    assert len(bad) == 1 and "(temperature=2)" in bad[0]
 
 
 def test_stationary_caveats_single_chain_uses_blocks():
     t = sweep_table([{"temperature": 2.0, "tau_abs": 1.0, "chains": 1}], samples=1000,
                     blocks=20, sweep="temperature=2.0")
-    assert stationary_caveats(t) == ["error bars from 20 jackknife blocks are themselves "
-                                     "uncertain by about +-16%"]
+    assert stationary_caveats(t) == ["syn_sweep.csv: error bars from 20 jackknife blocks are "
+                                     "themselves uncertain by about +-16%"]
 
 
 @pytest.mark.parametrize("variant", ["one", "chains"])
@@ -369,3 +398,20 @@ def test_wilson_interval():
     assert hi == 1 and lo == pytest.approx(0.8389, abs=1e-3)
     lo, hi = wilson_interval(0, 20)
     assert lo == 0 and hi == pytest.approx(0.1611, abs=1e-3)
+
+
+def test_summarise_samples_picks_the_named_observable():
+    from pathlib import Path
+    rng = np.random.default_rng(1)
+    n = 200
+    cols = {"sample": np.arange(n, dtype=float), "chain": np.zeros(n), "sweep": np.arange(n) + 1.0,
+            "m": rng.normal(0.5, 0.1, n), "energy": rng.normal(-1.5, 0.1, n)}
+    t = Table(Path("two_samples.csv"), "samples", Provenance(), cols, list(cols))
+    with pytest.raises(InputError, match="several observable columns"):
+        summarise_samples(t, {"dims": "10x10"})
+    by_config = summarise_samples(t, {"dims": "10x10", "observable": "m"})
+    assert by_config.values["mean"][0] == pytest.approx(cols["m"].mean())
+    by_arg = summarise_samples(t, {"dims": "10x10", "observable": "m"}, observable="energy")
+    assert by_arg.values["mean"][0] == pytest.approx(cols["energy"].mean())
+    with pytest.raises(InputError, match="no observable column 'rho'"):
+        summarise_samples(t, {"dims": "10x10"}, observable="rho")

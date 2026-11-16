@@ -113,7 +113,8 @@ def families(sources: list[str | Path], column: str, xkey: str | None = None,
     models = {n: _config(t).get("model") for n, t in zip(names, tables)}
     if len(set(models.values())) > 1:
         raise InputError("inputs have different models: "
-                         + ", ".join(f"{n} ({m})" for n, m in models.items()))
+                         + ", ".join(f"{n} ({m or 'model unknown: no provenance'})"
+                                     for n, m in models.items()))
     keys = {n: tuple(t.names[:2] if _config(t).get("sweep2") else t.names[:1])
             for n, t in zip(names, tables)}
     if len(set(keys.values())) > 1:

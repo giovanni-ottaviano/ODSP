@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -11,86 +12,20 @@
 
 #include "TestFramework.hpp"
 #include "TestHelpers.hpp"
+#include "DriverTestHelpers.hpp"
 #include "driver/Driver.hpp"
+#include "Ensemble.hpp"
+#include "RegularLattice.hpp"
+#include "VoterModel.hpp"
 
 // consensus_time in prefix_replicas.csv: written only for models that can leave
-// consensus (first passage), where stop_time is the cap.
+// consensus (first passage), where stop_time is the cap. Also: runs that start
+// in consensus, and the stdout note on runs that did not reach consensus.
 
 using namespace driver;
 namespace fs = std::filesystem;
 
-namespace {
-
-int run(std::vector<std::string> args, std::string* output = nullptr) {
-    args.insert(args.begin(), "odsp");
-    std::vector<char*> argv;
-    for (auto& a : args) argv.push_back(a.data());
-    std::ostringstream out, err;
-    std::streambuf* o = std::cout.rdbuf(out.rdbuf());
-    std::streambuf* e = std::cerr.rdbuf(err.rdbuf());
-    const int status = run_driver(static_cast<int>(argv.size()), argv.data());
-    std::cout.rdbuf(o);
-    std::cerr.rdbuf(e);
-    if (output) *output = out.str() + err.str();
-    return status;
-}
-
-struct TempFiles {
-    std::string stem;
-    TempFiles() {
-        std::random_device rd;
-        stem = (fs::temp_directory_path() / ("odsp_ctime_" + std::to_string(rd()))).string();
-    }
-    ~TempFiles() {
-        std::error_code ec;
-        const fs::path dir = fs::path(stem).parent_path();
-        const std::string name = fs::path(stem).filename().string();
-        for (const auto& f : fs::directory_iterator(dir, ec))
-            if (f.path().filename().string().rfind(name, 0) == 0) fs::remove(f.path(), ec);
-    }
-    std::string path(const std::string& suffix) const { return stem + suffix; }
-};
-
-// Header names of a CSV (after the '#' preamble).
-std::vector<std::string> header_of(const std::string& path) {
-    std::istringstream in(read_without_comments(path));
-    std::string line, cell;
-    std::getline(in, line);
-    std::vector<std::string> names;
-    std::stringstream hs(line);
-    while (std::getline(hs, cell, ',')) names.push_back(cell);
-    return names;
-}
-
-// A cell as a number; empty, "nan" or text cells (e.g. a swept "tie" value) as NaN.
-double number(const std::string& cell) {
-    try {
-        std::size_t used = 0;
-        const double v = std::stod(cell, &used);
-        return used == cell.size() ? v : std::nan("");
-    } catch (const std::exception&) {
-        return std::nan("");
-    }
-}
-
-// Columns by name; non-numeric cells parse as NaN.
-std::map<std::string, std::vector<double>> read_csv(const std::string& path) {
-    std::istringstream in(read_without_comments(path));
-    std::string line, cell;
-    std::getline(in, line);
-    std::vector<std::string> names;
-    std::stringstream hs(line);
-    while (std::getline(hs, cell, ',')) names.push_back(cell);
-    std::map<std::string, std::vector<double>> cols;
-    while (std::getline(in, line)) {
-        std::stringstream ls(line);
-        for (std::size_t k = 0; std::getline(ls, cell, ','); ++k)
-            cols[names[k]].push_back(number(cell));
-    }
-    return cols;
-}
-
-} // namespace
+using namespace driver_test;
 
 TEST_CASE(consensus_time_written_for_first_passage_models) {
     TempFiles tmp;
@@ -153,4 +88,72 @@ TEST_CASE(consensus_time_absent_for_absorbing_models) {
         const std::vector<std::string> h = header_of(tmp.stem + "_replicas.csv");
         for (const auto& name : h) CHECK(name != "consensus_time");
     }
+}
+
+// A replica that starts in consensus is absorbed at time 0: no step is taken.
+TEST_CASE(consensus_at_start_takes_no_time) {
+    for (const char* model : {"voter", "majority"}) {
+        TempFiles tmp;
+        std::string out;
+        CHECK(run({"--model", model, "--init", "up", "--dims", "6x6", "--task", "ensemble", "--replicas", "3",
+                   "--steps", "50", "--seed", "1", "--csv", tmp.stem}, &out) == 0);
+        const auto rep = read_csv(tmp.stem + "_replicas.csv");
+        for (std::size_t i = 0; i < rep.at("replica").size(); ++i) {
+            CHECK(rep.at("reached_consensus")[i] == 1.0);
+            CHECK(rep.at("stop_time")[i] == 0.0);
+            if (std::string(model) == "majority") CHECK(rep.at("freeze_time")[i] == 0.0);
+        }
+        CHECK(out.find("Consensus time (sweeps): mean 0 ") != std::string::npos);
+    }
+    // the same in single updates
+    TempFiles tmp;
+    CHECK(run({"--model", "voter", "--init", "up", "--dims", "6x6", "--task", "ensemble", "--replicas", "2",
+               "--time-unit", "updates", "--steps", "50", "--seed", "1", "--csv", tmp.stem}) == 0);
+    const auto rep = read_csv(tmp.stem + "_replicas.csv");
+    CHECK(rep.at("stop_time").size() == 2);
+    for (double t : rep.at("stop_time")) CHECK(t == 0.0);
+}
+
+TEST_CASE(ensemble_consensus_at_start_takes_no_time) {
+    auto all_up = [](std::mt19937& rng) -> std::unique_ptr<Model<int>> {
+        auto g = std::make_unique<RegularLattice<int>>(std::vector<int>(16, 1), std::vector<int>{4, 4});
+        return std::make_unique<VoterModel<int>>(std::move(g), &rng);
+    };
+    Ensemble<int> ens(all_up, 7);
+    const auto r = ens.run(3, 10);
+    CHECK(r.consensus_count == 3);
+    for (long long t : r.consensus_times) CHECK(t == 0);
+    for (long long t : r.stop_times) CHECK(t == 0);
+    CHECK(r.mean_consensus_time_lower_bound == 0.0);
+}
+
+// Majority runs that freeze away from consensus never reach it: no "true mean >="
+// bound (which would count them at the cap), and the note says why they are missing.
+TEST_CASE(stdout_note_on_frozen_runs) {
+    std::string out;
+    TempFiles tmp;
+    CHECK(run({"--model", "majority", "--dims", "16x16", "--task", "ensemble", "--replicas", "30",
+               "--steps", "2000", "--seed", "4", "--csv", tmp.stem}, &out) == 0);
+    const auto rep = read_csv(tmp.stem + "_replicas.csv");
+    int frozen = 0, capped = 0, consensus = 0;
+    for (std::size_t i = 0; i < rep.at("replica").size(); ++i) {
+        consensus += rep.at("reached_consensus")[i] == 1.0;
+        frozen += rep.at("absorbed")[i] == 1.0 && rep.at("reached_consensus")[i] == 0.0;
+        capped += rep.at("absorbed")[i] == 0.0;
+    }
+    CHECK(frozen > 0 && consensus > 0 && capped == 0);   // the fixture: frozen runs, none capped
+    CHECK(out.find("true mean >=") == std::string::npos);
+    CHECK(out.find("biased low") == std::string::npos);
+    CHECK(out.find(std::to_string(frozen) + " runs stopped in an absorbing state without consensus") != std::string::npos);
+}
+
+TEST_CASE(stdout_note_on_capped_runs) {
+    // capped voter runs: the lower bound is valid and still printed
+    std::string out;
+    CHECK(run({"--model", "voter", "--dims", "8x8", "--task", "ensemble", "--replicas", "20", "--steps", "60",
+               "--seed", "2"}, &out) == 0);
+    CHECK(out.find("did not reach consensus") != std::string::npos);
+    CHECK(out.find("hit the cap") != std::string::npos);
+    CHECK(out.find("true mean >=") != std::string::npos);
+    CHECK(out.find("absorbing state without consensus") == std::string::npos);
 }

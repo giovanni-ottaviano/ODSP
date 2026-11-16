@@ -112,6 +112,8 @@ inline const std::vector<OptionDoc>& task_options() {
         {"stop", "true|false", "true", "run: stop when the dynamics is absorbed"},
         {"replicas", "n", "100 / 1", "ensemble: independent runs; stationary: independent chains, pooled (errors from their spread)"},
         {"time-unit", "sweeps|updates", "sweeps", "ensemble: unit of consensus times (and of --steps)"},
+        {"first-replica", "k", "0", "ensemble: run replicas k..k+n-1 of the ensemble (split one ensemble across jobs; "
+                                    "the merged files equal a single run's)"},
         {"observable", "name", "model-dependent", "stationary: the sampled observable"},
         {"burn-in", "n", "1000", "stationary: sweeps discarded first"},
         {"samples", "n", "1000", "stationary: number of samples"},

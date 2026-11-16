@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 
 from ..errors import InputError
 from ..io import Provenance, Table
 from ..sizes import _parse_dims
 from .style import finish, new_fig, PALETTE
-
-
-def _warn(warnings, text):
-    if warnings is not None:
-        warnings.append(text)
+from .style import warn as _warn
 
 
 def _panel(ax, grid2d, vmin, vmax, cmap, title):
@@ -86,7 +84,6 @@ def plot_states(t: Table, prov: Provenance, max_panels: int = 6,
                    if uniq.size > 1 else [Patch(color=PALETTE[0], label=f"{uniq[0]:g}")],
                    loc="outside right upper", title="opinion", fontsize=7)
     else:
-        sm = __import__("matplotlib.cm", fromlist=["cm"]).ScalarMappable(
-            norm=__import__("matplotlib.colors", fromlist=["c"]).Normalize(vmin, vmax), cmap=cmap)
+        sm = ScalarMappable(norm=Normalize(vmin, vmax), cmap=cmap)
         fig.colorbar(sm, ax=axes.ravel().tolist(), label="opinion", shrink=0.8)
     return [("states", finish(fig, prov))]

@@ -133,3 +133,29 @@ def test_header_only_table(tmp_path):
     o = find_outputs(tmp_path / "h")
     assert len(o.get("sweep")) == 0
     assert o.provenance.config["model"] == "ising"
+
+
+def test_bom_prefixed_csv(tmp_path):
+    p = tmp_path / "a_sweep.csv"
+    p.write_bytes("﻿x,y\n1,2\n".encode("utf-8"))
+    t = read_table(p)
+    assert t.names == ["x", "y"] and t["x"][0] == 1
+
+
+def test_unknown_prefix_suggests_close_prefixes(tmp_path):
+    (tmp_path / "ising_L16_sweep.csv").write_text("x,y\n1,2\n")
+    with pytest.raises(InputError) as e:
+        find_outputs(tmp_path / "ising_L61")
+    assert f"did you mean {tmp_path}/ising_L16?" in str(e.value)
+    with pytest.raises(InputError) as e:
+        find_outputs(tmp_path / "zzz")
+    assert "did you mean" not in str(e.value)
+
+
+def test_missing_csv_named_as_prefix(tmp_path):
+    (tmp_path / "P_sweep.csv").write_text("x,y\n1,2\n")
+    with pytest.raises(InputError) as e:
+        find_outputs(str(tmp_path / "P.csv"))
+    msg = str(e.value)
+    assert "P.csv does not exist" in msg and "<prefix>_<kind>.csv" in msg
+    assert f"did you mean {tmp_path}/P?" in msg

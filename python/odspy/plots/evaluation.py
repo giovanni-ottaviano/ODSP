@@ -119,9 +119,11 @@ def plot_fit(result: FitResult, xlabel: str, ylabel: str, prov: Provenance | Non
         shown &= x > 0
     if logy:
         shown &= y > 0
-    hidden = int((np.isfinite(x) & np.isfinite(y) & ~shown).sum())
-    if hidden:
-        own.append(f"{hidden} point(s) with values <= 0 not shown on the log axes")
+    finite = np.isfinite(x) & np.isfinite(y)
+    for axis, vals, on in (("x", x, logx), ("y", y, logy)):
+        n = int((finite & (vals <= 0)).sum()) if on else 0
+        if n:   # say which coordinate: an x = 0 (time zero) is not a bad y value
+            own.append(f"{n} point(s) with {axis} <= 0 not shown on the log {axis} axis")
     res = r.residuals()
     for sel, alpha, label in ((r.used & shown, 1.0, "fitted points"),
                               (~r.used & shown, FADE, "outside the fit range")):

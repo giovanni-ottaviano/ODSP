@@ -27,6 +27,12 @@ _RC = {"axes.grid": True, "grid.alpha": 0.25, "axes.spines.top": False,
        "legend.frameon": False, "axes.prop_cycle": plt.cycler(color=PALETTE)}
 
 
+def warn(warnings, text: str) -> None:
+    """Append `text` to the caller's warning list, if it passed one."""
+    if warnings is not None:
+        warnings.append(text)
+
+
 def color(i: int) -> str:
     return PALETTE[i % len(PALETTE)]
 

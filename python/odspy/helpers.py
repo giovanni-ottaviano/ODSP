@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .errors import InputError
+from .errors import InputError, rng_from
 from .fits import FitResult, _fit
 from .io import Table, find_outputs
 from .sizes import SizeCurve, size_of
@@ -203,7 +203,7 @@ def consensus_time_vs_size(sources, size="auto", censored="exclude", model="powe
     else:
         y = np.full(x.size, np.nan)
         yerr = np.full(x.size, np.nan)
-        rng = np.random.default_rng(seed)
+        rng = rng_from(seed)
         undetermined = []
         for k, p in enumerate(pts):
             if p[5] is None or p[5].get("replicas") is None:
@@ -317,7 +317,7 @@ def peak_vs_size(curves, n_boot=1000, seed=0) -> FitResult:
     fraction of bootstrap draws that were bracketed is reported when below 100%."""
     curves = _curves(curves)
     n_boot = _check_boot(n_boot)
-    rng = np.random.default_rng(seed)
+    rng = rng_from(seed)
     sizes, vals, errs, warns, edge = [], [], [], [], []
     for c in curves:
         e = _need_err(c)
@@ -362,7 +362,7 @@ def slope_at_crossing_vs_size(curves, x0, n_boot=1000, seed=0) -> FitResult:
         x0 = float(x0)
     except (TypeError, ValueError):
         raise InputError(f"x0 must be a number, got {x0!r}") from None
-    rng = np.random.default_rng(seed)
+    rng = rng_from(seed)
     stat = _local_slope(x0)
     sizes, vals, errs, warns, edge = [], [], [], [], []
     for c in curves:
@@ -419,7 +419,7 @@ def log_growth_vs_size(curves_or_values, x0=None, n_boot=1000, seed=0) -> FitRes
             x0 = float(x0)
         except (TypeError, ValueError):
             raise InputError(f"x0 must be a number, got {x0!r}") from None
-        rng = np.random.default_rng(seed)
+        rng = rng_from(seed)
         stat = _value_at(x0)
         sizes, vals, errs, warns = [], [], [], []
         for c in curves:
@@ -458,32 +458,87 @@ def _cfg_int(config, key, default):
         raise InputError(f"configuration: {key}={config[key]!r} is not a number") from None
 
 
+def _points_text(labels: list[str], n: int) -> str:
+    """'at all 21 points' / 'at 2 of 21 points (a; b)': which points of a sweep a caveat concerns."""
+    k = len(labels)
+    if n == 1:
+        return f"at {labels[0]}" if labels[0] else ""
+    head = f"at all {n} points" if k == n else f"at {k} of {n} points"
+    if k == n:
+        return head
+    shown = "; ".join(labels[:4]) + ("; ..." if k > 4 else "")
+    return f"{head} ({shown})"
+
+
+def stationary_flags(table: Table) -> dict[str, np.ndarray]:
+    """Per point of a stationary sweep table, the driver's checks:
+    'short' -- jackknife blocks (samples / blocks) shorter than 10 tau_abs: every error may
+    be underestimated; 'sign' -- blocks long against tau_abs but shorter than 10 tau (x
+    changes sign rarely): only the plain mean's error is unreliable; 'disagree' -- chains
+    disagreeing by more than 3x their own errors on |mean| or Binder (not equilibrated)."""
+    config = _config(table)
+    blocks = _cfg_int(config, "blocks", 20)
+    samples = _cfg_int(config, "samples", 0)
+    n = len(table)
+    block = samples / blocks if samples > 0 and blocks > 0 else math.nan
+
+    def col(name):
+        return _num(table, name).astype(float) if table.has(name) else np.full(n, np.nan)
+
+    tau, tau_abs = col("tau"), col("tau_abs")
+    with np.errstate(invalid="ignore"):
+        short = np.isfinite(tau_abs) & (block < 10.0 * tau_abs)
+        sign = ~short & np.isfinite(tau) & (block < 10.0 * tau)
+        disagree = np.zeros(n, bool)
+        chains = col("chains")
+        for name in ("abs_mean", "binder"):
+            err, within = col(name + "_err"), col(name + "_err_within")
+            disagree |= (chains > 1) & (err > 3.0 * within)
+    return {"short": short, "sign": sign, "disagree": disagree}
+
+
 def stationary_caveats(table: Table) -> list[str]:
-    """Caveats of a stationary sweep table: points whose jackknife blocks
-    (samples / blocks) are shorter than 10 tau_abs, and how uncertain the error bars
-    themselves are (one line per distinct number of chains)."""
+    """Caveats of a stationary sweep table, one line per kind, each naming the file and the
+    points it concerns: jackknife blocks short against tau_abs (all errors may be
+    underestimated), rare sign changes (only the plain mean's error), chains that disagree,
+    and how uncertain the error bars themselves are (one line per number of chains)."""
     config = _config(table)
     blocks = _cfg_int(config, "blocks", 20)
     samples = _cfg_int(config, "samples", 0)
     names = table.names
     keys = names[:2] if config.get("sweep2") else names[:1]
-    out: list[str] = []
-    notes: list[str] = []
     n = len(table)
+    if n == 0:
+        return []
+    where = f"{table.path.name}: "
+    labels = [", ".join(f"{k}={_label(table[k][i])}" for k in keys) for i in range(n)]
+    flags = stationary_flags(table)
+    block = samples / blocks if samples > 0 and blocks > 0 else math.nan
+    out: list[str] = []
+    if flags["short"].any():
+        idx = np.flatnonzero(flags["short"])
+        top = float(np.nanmax(_num(table, "tau_abs")[idx]))
+        out.append(f"{where}jackknife blocks of {block:.3g} samples are not much longer than the "
+                   f"autocorrelation time {_points_text([labels[i] for i in idx], n)} "
+                   f"(tau_abs up to {top:.3g}); errors may be underestimated (use more --samples "
+                   "or a larger --interval)")
+    if flags["sign"].any():
+        idx = np.flatnonzero(flags["sign"])
+        top = float(np.nanmax(_num(table, "tau")[idx]))
+        out.append(f"{where}x changes sign only rarely {_points_text([labels[i] for i in idx], n)} "
+                   f"(autocorrelation up to {top:.3g} samples), so the error of the plain mean is "
+                   "unreliable there; |mean|, susceptibility and Binder are fine")
+    if flags["disagree"].any():
+        idx = np.flatnonzero(flags["disagree"])
+        out.append(f"{where}the chains disagree far more than their own errors allow (|mean| or "
+                   f"Binder) {_points_text([labels[i] for i in idx], n)}; they have probably not "
+                   "equilibrated (use a longer --burn-in or more --samples)")
+    notes: list[str] = []
     for i in range(n):
-        label = ", ".join(f"{k}={_label(table[k][i])}" for k in keys)
-        if table.has("tau_abs") and samples > 0 and blocks > 0:
-            tau = float(_num(table, "tau_abs")[i])
-            block = samples / blocks
-            if math.isfinite(tau) and block < 10.0 * tau:
-                out.append(f"{label}: jackknife blocks of {block:.3g} samples are not much "
-                           f"longer than the autocorrelation time (tau_abs = {tau:.3g}); "
-                           "errors may be underestimated (use more --samples or a larger "
-                           "--interval)")
         chains = int(_num(table, "chains")[i]) if table.has("chains") \
             else _cfg_int(config, "replicas", 1)
         if chains > 1 or blocks > 1:
-            note = _error_bar_note(chains, blocks)
+            note = where + _error_bar_note(chains, blocks)
             if note not in notes:
                 notes.append(note)
     return out + notes
@@ -664,26 +719,33 @@ def _tau_int(x: np.ndarray, c: float = 6.0) -> float:
     return max(tau, 0.5)
 
 
-def summarise_samples(t: Table, config: dict[str, str]) -> Recovered:
+def summarise_samples(t: Table, config: dict[str, str], observable: str | None = None) -> Recovered:
     """The driver's stationary estimators from a `_samples.csv` table.
 
     mean, abs_mean, susceptibility N(<x^2>-<x>^2), abs_susceptibility
     N(<x^2>-<|x|>^2) and Binder 1-<x^4>/(3<x^2>^2) of the sampled observable. With
     several chains the samples are pooled and the error is the leave-one-chain-out
     jackknife (as the driver); with one chain, the block jackknife with the config's
-    `blocks` (default 20).
+    `blocks` (default 20). The observable is `observable`, else the configuration's
+    `observable`, else the table's only observable column.
     """
     for name in ("sample", "chain"):
         if not t.has(name):
             raise InputError(f"{t.path}: no column '{name}': summarise_samples needs a "
                              "<prefix>_samples.csv table")
-    obs = [n for n in t.names if n not in ("sample", "chain", "sweep")]
-    if not obs:
-        raise InputError(f"{t.path}: no observable column")
-    x_all = np.asarray(_num(t, obs[-1]), float)
+    cands = [n for n in t.names if n not in ("sample", "chain", "sweep")]
+    name = observable or (config or {}).get("observable")
+    if name is None:
+        if len(cands) != 1:
+            raise InputError(f"{t.path}: " + ("no observable column" if not cands else
+                             f"several observable columns ({', '.join(cands)}): name one"))
+        name = cands[0]
+    elif name not in cands:
+        raise InputError(f"{t.path}: no observable column '{name}' (has {', '.join(cands) or 'none'})")
+    x_all = np.asarray(_num(t, name), float)
     chain = _num(t, "chain")
     if x_all.size == 0 or not np.all(np.isfinite(x_all)):
-        raise InputError(f"{t.path}: no samples, or non-finite values in '{obs[-1]}'")
+        raise InputError(f"{t.path}: no samples, or non-finite values in '{name}'")
     ids = np.unique(chain)
     R = ids.size
     parts = [x_all[chain == c] for c in ids]   # chain after chain, file order within a chain

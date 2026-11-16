@@ -8,22 +8,18 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..errors import InputError
-from ..helpers import _label, is_first_passage, stationary_caveats
+from ..helpers import _label, is_first_passage, stationary_caveats, stationary_flags
 from ..io import Table
 from ..sizes import size_of
 from .style import (BETWEEN_CHAIN, JACKKNIFE, SD_RT, color, finish, grid, hide_unused, masked,
                     new_fig, note_undefined, numeric)
+from .style import warn as _warn
 
 CENSORED = "censored: mean biased low"
 STATIONARY = [("mean", "⟨m⟩"), ("abs_mean", "⟨|m|⟩"), ("susceptibility", "susceptibility"),
               ("abs_susceptibility", "|m| susceptibility"), ("binder", "Binder U"),
               ("specific_heat", "specific heat"), ("xi_over_L", "ξ/L")]
 _TIME_COLS = ("mean_consensus_time", "mean_consensus_time_lower_bound")
-
-
-def _warn(warnings, text):
-    if warnings is not None:
-        warnings.append(text)
 
 
 @dataclass
@@ -75,17 +71,12 @@ def series_of(t: Table, only: str | None = None) -> list[Series]:
     return out
 
 
-def _flagged(t: Table, keys: list[str]) -> tuple[np.ndarray, list[str]]:
-    """Points flagged by stationary_caveats (blocks short relative to tau), and its messages."""
-    flag = np.zeros(len(t), bool)
+def _flagged(t: Table) -> tuple[np.ndarray, list[str]]:
+    """Points whose jackknife blocks are short relative to tau_abs, and the table's
+    stationary caveats (each already names the file)."""
     if not is_stationary(t):
-        return flag, []
-    msgs = stationary_caveats(t)
-    for i in range(len(t)):
-        label = ", ".join(f"{k}={_label(t[k][i])}" for k in keys)
-        if any(m.startswith(label + ": jackknife blocks") for m in msgs):
-            flag[i] = True
-    return flag, msgs
+        return np.zeros(len(t), bool), []
+    return stationary_flags(t)["short"], stationary_caveats(t)
 
 
 def _xvalues(t: Table, name: str):
@@ -96,7 +87,7 @@ def _xvalues(t: Table, name: str):
     sizes = []
     for v in col:
         try:
-            sizes.append(size_of({"dims": str(v)}, "auto" if False else "N")[0])
+            sizes.append(size_of({"dims": str(v)}, "N")[0])
         except InputError:
             return np.arange(len(col), dtype=float), [str(v) for v in col], name, False
     return np.array(sizes, float), None, f"{name}: sites N", True
@@ -139,9 +130,9 @@ def plot_sweep(t: Table, warnings: list[str] | None = None):
         return plot_sweep2(t, warnings=warnings)
     key = t.names[0]
     x, ticks, xlabel, logx = _xvalues(t, key)
-    flag, msgs = _flagged(t, [key])
+    flag, msgs = _flagged(t)
     for m in msgs:
-        _warn(warnings, f"{t.path.name}: {m}")
+        _warn(warnings, m)
     series = series_of(t)
     for s in series:
         note_undefined(warnings, f"{t.path.name} {s.column}", s.err,
@@ -252,9 +243,9 @@ def plot_sweep2(t: Table, column: str | None = None, warnings: list[str] | None 
     xin, ticks, xlabel, logx = _xvalues(t, inner)
     if column is not None and not t.has(column):
         raise InputError(f"{t.path}: no column '{column}' (has: {', '.join(t.names)})")
-    flag, msgs = _flagged(t, [outer, inner])
+    flag, msgs = _flagged(t)
     for m in msgs:
-        _warn(warnings, f"{t.path.name}: {m}")
+        _warn(warnings, m)
     series = series_of(t, only=column)
     for s in series:
         note_undefined(warnings, f"{t.path.name} {s.column}", s.err,
@@ -274,7 +265,7 @@ def plot_sweep2(t: Table, column: str | None = None, warnings: list[str] | None 
             m = olab == o
             _draw(ax, xin[m], Series(s.column, s.label, s.y[m],
                                      None if s.err is None else s.err[m], s.err_label),
-                  flag[m], color(k), label_prefix=f"{outer}={o}: " if False else "")
+                  flag[m], color(k))
         _setx(ax, xin, ticks, xlabel, logx)
         ax.set_ylabel(s.label)
     hide_unused(axes, len(series))

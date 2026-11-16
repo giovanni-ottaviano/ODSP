@@ -39,7 +39,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from .crossings import _clean
-from .errors import InputError
+from .errors import InputError, rng_from
 from .sizes import SizeCurve
 
 POOR_QUALITY = 3.0
@@ -328,6 +328,7 @@ def search_collapse(curves, xc0: float, nu0: float, a0: float = 0.0, fit_a: bool
         raise InputError(f"starts must be an integer from 1 to {MAX_STARTS}, got {starts!r}")
     if not isinstance(fit_a, (bool, np.bool_)):
         raise InputError(f"fit_a must be True or False, got {fit_a!r}")
+    rng_from(seed)          # checked before the search, not after it
     data = _Data(curves)
     names = ["xc", "nu", "a"] if fit_a else ["xc", "nu"]
     fixed = [] if fit_a else ["a"]
@@ -515,7 +516,7 @@ def search_collapse(curves, xc0: float, nu0: float, a0: float = 0.0, fit_a: bool
         start_dependence(errors)
         return _result(data, float(p[0]), float(p[1]), a, errors, True, fixed,
                        head + f"; errors withheld: {short}", extra, whys)
-    rng = np.random.default_rng(seed)
+    rng = rng_from(seed)
     boot, failed = [], 0
     for _ in range(int(n_boot)):
         ys = [rng.normal(y, e) for y, e in zip(data.y, data.e)]

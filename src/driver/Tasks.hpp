@@ -40,6 +40,7 @@ struct TaskParams {
     bool        stop = true;
     std::vector<std::string> observables;
     int         replicas = 100;
+    long long   first_replica = 0;          // ensemble: index of the first replica (--first-replica)
     bool        sweeps_unit = true;
     std::string observable;
     long long   burn_in = 1000;
@@ -130,6 +131,8 @@ inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec
     t.save_trajectories = o.flag("save-trajectories", false);
     if (t.save_trajectories && task != "ensemble")
         throw OptionError("--save-trajectories is for --task ensemble with a time series (--every or --log-times)");
+    if (o.has("first-replica") && task != "ensemble")
+        throw OptionError("--first-replica is for --task ensemble (it picks which replicas of the ensemble to run)");
     auto positive = [&o](const std::string& key, long long fallback) {
         const long long v = o.integer(key, fallback);
         if (v < 1) throw OptionError("option --" + key + " must be >= 1");
@@ -156,6 +159,8 @@ inline TaskParams read_task(Options& o, const std::string& task, const ModelSpec
         t.correlation = o.flag("correlation", false);
     } else if (task == "ensemble") {
         t.replicas = static_cast<int>(positive("replicas", 100));
+        t.first_replica = o.integer("first-replica", 0);
+        if (t.first_replica < 0) throw OptionError("option --first-replica must be >= 0");
         t.sweeps_unit = o.choice("time-unit", "sweeps", {"sweeps", "updates"}) == "sweeps";
         t.steps = positive("steps", t.sweeps_unit ? 10000 : 100000000LL);
         t.times = read_grid(0);   // empty: no time series
@@ -212,10 +217,10 @@ void write_states(const std::string& prefix, const Topology& g, const std::vecto
     }
 }
 
-inline std::vector<std::string> numbered(const std::string& name, int count) {
+inline std::vector<std::string> numbered(const std::string& name, int count, long long first = 0) {
     std::vector<std::string> v;
     for (int k = 0; k < count; ++k)
-        v.push_back(name + std::to_string(k));
+        v.push_back(name + std::to_string(first + k));
     return v;
 }
 
@@ -388,10 +393,11 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
             }
         };
 
-    Ensemble<T> ens(s.factory, seed);
+    const long long first = t.first_replica;   // replica labels in the output files: first, first + 1, ...
+    Ensemble<T> ens(s.factory, seed, static_cast<unsigned long long>(first));
     const auto r = ens.run(t.replicas, t.steps, t.sweeps_unit, threads, obs, hooks);
     if (t.save_states) {
-        write_states<T>(t.states_prefix, *s.topology, numbered("replica", t.replicas), finals);
+        write_states<T>(t.states_prefix, *s.topology, numbered("replica", t.replicas, first), finals);
         if (verbose)
             std::cout << "Final states written to " << path_for(t.states_prefix, "states") << " (one column per replica)\n";
     }
@@ -458,12 +464,12 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
             if (majority) values.push_back(freeze_times[static_cast<std::size_t>(i)]);
             if (use_threshold) values.push_back(static_cast<double>(threshold_times[static_cast<std::size_t>(i)]));
             for (std::size_t k = 0; k < obs.size(); ++k) values.push_back(r.final_observables[k][i]);
-            rep.row_values(std::to_string(i), values);
+            rep.row_values(std::to_string(first + i), values);
         }
         if (is_continuous(s.model.name)) {
             CsvWriter cl(path_for(prefix, "clusters"), {"replica", "position", "size", "min", "max"});
             for (std::size_t i = 0; i < clusters.size(); ++i)
-                for (const OpinionCluster& c : clusters[i]) cl.row(i, c.position, c.size, c.min, c.max);
+                for (const OpinionCluster& c : clusters[i]) cl.row(first + static_cast<long long>(i), c.position, c.size, c.min, c.max);
         }
         if (keep_domains) {   // one row per domain of each final state, largest first
             std::vector<std::string> dh = {"replica", "size"};
@@ -471,10 +477,11 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
             CsvWriter dw(path_for(prefix, "domains"), dh);
             for (std::size_t i = 0; i < domains.size(); ++i)
                 for (const Domain& d : domains[i].domains) {
+                    const long long label = first + static_cast<long long>(i);
                     if (s.context.periodic)
-                        dw.row(i, d.size, d.wraps);
+                        dw.row(label, d.size, d.wraps);
                     else
-                        dw.row(i, d.size);
+                        dw.row(label, d.size);
                 }
         }
         if (!r.fixation_counts.empty()) {
@@ -533,7 +540,7 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
                 for (std::size_t k = 0; k < K; ++k) {
                     std::vector<double> values = {static_cast<double>(grid[k])};
                     for (std::size_t o = 0; o < O; ++o) values.push_back(slot(i, k, o));
-                    traj.row_values(std::to_string(i), values);
+                    traj.row_values(std::to_string(first + static_cast<long long>(i)), values);
                 }
             if (verbose) std::cout << "Every replica's time series in " << path_for(prefix, "trajectories") << '\n';
         }
@@ -579,7 +586,10 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
     }
 
     if (verbose) {
-        std::cout << "Replicas: " << r.replicas << ", each run for " << (r.first_passage ? "" : "at most ")
+        std::cout << "Replicas: " << r.replicas
+                  << (first > 0 ? " (replicas " + std::to_string(first) + ".." + std::to_string(first + r.replicas - 1) +
+                                      " of the ensemble)" : std::string())
+                  << ", each run for " << (r.first_passage ? "" : "at most ")
                   << t.steps << " " << unit << ".\n";
         if (r.first_passage)
             std::cout << "This model can leave consensus, so consensus times are FIRST-PASSAGE times and there is\n"
@@ -595,9 +605,23 @@ Row task_ensemble(const TaskParams& t, const Setup<T>& s, unsigned seed, int thr
                       << fmt(r.stddev_consensus_time / std::sqrt(static_cast<double>(r.consensus_count)), 3)
                       << ", sd " << fmt(r.stddev_consensus_time) << ", median "
                       << (std::isnan(r.median_consensus_time) ? std::string("n/a") : fmt(r.median_consensus_time)) << '\n';
-            if (r.consensus_count < r.replicas)
-                std::cout << "  (" << r.replicas - r.consensus_count << " runs did not reach consensus: the mean is biased low;"
-                          << " true mean >= " << fmt(r.mean_consensus_time_lower_bound) << ")\n";
+            if (r.consensus_count < r.replicas) {
+                // Runs absorbed away from consensus (frozen majority states, converged clusters) never
+                // reach it, so counting them at the cap would bound nothing; only capped runs bias the mean.
+                int stuck = 0, capped = 0;
+                for (int i = 0; i < r.replicas; ++i)
+                    if (!r.reached[static_cast<std::size_t>(i)])
+                        ++(!r.first_passage && absorbed_flags[static_cast<std::size_t>(i)] > 0.5 ? stuck : capped);
+                std::cout << "  (" << r.replicas - r.consensus_count << " runs did not reach consensus";
+                if (stuck > 0)
+                    std::cout << ": " << stuck << " runs stopped in an absorbing state without consensus"
+                              << " (they never reach it), so the mean is over the runs that did";
+                if (capped > 0) {
+                    std::cout << (stuck > 0 ? "; " : ": ") << capped << " runs hit the cap, so the mean is biased low";
+                    if (stuck == 0) std::cout << "; true mean >= " << fmt(r.mean_consensus_time_lower_bound);
+                }
+                std::cout << ")\n";
+            }
             if (!is_continuous(s.model.name) && !r.first_passage) {
                 std::vector<std::pair<T, int>> fix = r.fixation_counts;
                 std::sort(fix.begin(), fix.end(), [](const auto& a, const auto& b) { return a.second > b.second; });

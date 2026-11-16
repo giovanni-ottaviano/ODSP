@@ -10,6 +10,7 @@
 
 #include "TestFramework.hpp"
 #include "TestHelpers.hpp"
+#include "DriverTestHelpers.hpp"
 #include "driver/Driver.hpp"
 
 // --save-states: final configurations to prefix_states.csv, in the format
@@ -18,39 +19,9 @@
 using namespace driver;
 namespace fs = std::filesystem;
 
+using namespace driver_test;
+
 namespace {
-
-int run(std::vector<std::string> args) {
-    args.insert(args.begin(), "odsp");
-    std::vector<char*> argv;
-    for (auto& a : args) argv.push_back(a.data());
-    std::ostringstream out, err;
-    std::streambuf* o = std::cout.rdbuf(out.rdbuf());
-    std::streambuf* e = std::cerr.rdbuf(err.rdbuf());
-    const int status = run_driver(static_cast<int>(argv.size()), argv.data());
-    std::cout.rdbuf(o);
-    std::cerr.rdbuf(e);
-    return status;
-}
-
-struct TempFiles {
-    std::string stem;
-    TempFiles() {
-        std::random_device rd;
-        stem = (fs::temp_directory_path() / ("odsp_states_" + std::to_string(rd()))).string();
-    }
-    ~TempFiles() {
-        std::error_code ec;
-        const fs::path dir = fs::path(stem).parent_path();
-        const std::string name = fs::path(stem).filename().string();
-        for (const auto& f : fs::directory_iterator(dir, ec))
-            if (f.path().filename().string().rfind(name, 0) == 0) fs::remove(f.path(), ec);
-    }
-    std::string write(const std::string& suffix, const std::string& text) const {
-        std::ofstream(stem + suffix) << text;
-        return stem + suffix;
-    }
-};
 
 // A states file: the commented header's column names, and node -> values.
 struct States {
@@ -83,21 +54,6 @@ States read_states(const std::string& path) {
         for (std::size_t k = 0; std::getline(ls, cell, ','); ++k) s.values[k].push_back(std::stod(cell));
     }
     return s;
-}
-
-std::map<std::string, std::vector<double>> read_csv(const std::string& path) {
-    std::istringstream in(read_without_comments(path));
-    std::string line, cell;
-    std::getline(in, line);
-    std::vector<std::string> names;
-    std::stringstream hs(line);
-    while (std::getline(hs, cell, ',')) names.push_back(cell);
-    std::map<std::string, std::vector<double>> cols;
-    while (std::getline(in, line)) {
-        std::stringstream ls(line);
-        for (std::size_t k = 0; std::getline(ls, cell, ','); ++k) cols[names[k]].push_back(std::stod(cell));
-    }
-    return cols;
 }
 
 double mean(const std::vector<double>& v) {

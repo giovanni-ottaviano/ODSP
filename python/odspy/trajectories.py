@@ -13,8 +13,9 @@ from __future__ import annotations
 import numpy as np
 from scipy import stats
 
-from .errors import InputError
-from .fits import _MODELS, WEIGHTED, FitResult, _check_model, _core, _fit, _FitFailed
+from .errors import InputError, check_threshold, rng_from
+from .fits import (_MODELS, ERRORS_UNKNOWN, NOT_POSITIVE, WEIGHTED, FitResult, _check_model, _core,
+                   _fit, _FitFailed)
 from .io import Table
 
 UNTRUSTWORTHY = "errors not trustworthy: correlated points (rerun with --save-trajectories true)"
@@ -23,6 +24,8 @@ UNTRUSTWORTHY_G = ("errors not trustworthy: correlated points (G(r) at different
 UNTRUSTWORTHY_RUN = "errors not trustworthy: one autocorrelated trajectory"
 UNTRUSTWORTHY_PREFIX = "errors not trustworthy"
 BOOTSTRAP = "bootstrap over replicas"
+SINGULAR = ("goodness of fit not assessed: covariance of the replica values at the fitted times "
+            "is singular")
 CORRELATED = "weighted, correlated points"
 _SPREAD = "{points} with zero or missing error excluded (all replicas equal, or one replica)"
 
@@ -128,6 +131,7 @@ def fit_timeseries(ts: Table, observable: str, model="power", xrange=None,
     replica stopped) are excluded and counted in `warnings`.
     """
     names = _check_model(model)[0]
+    p_threshold = check_threshold(p_threshold)
     if not ts.has("time"):
         raise InputError(f"{ts.path}: no 'time' column: fit_timeseries needs an ensemble "
                          "time series (<prefix>_timeseries.csv from --task ensemble)")
@@ -158,7 +162,7 @@ def fit_timeseries(ts: Table, observable: str, model="power", xrange=None,
     xu = t[used]
     p0 = [base.params[k] for k in names]
 
-    rng = np.random.default_rng(seed)
+    rng = rng_from(seed)
     boot_params, boot_y, nonfinite, failed = [], [], 0, 0
     for _ in range(n_boot):
         yb = _apply(transform, V[rng.integers(0, R, R)].mean(axis=0))
@@ -175,7 +179,8 @@ def fit_timeseries(ts: Table, observable: str, model="power", xrange=None,
             boot_params.append(params)
         else:
             failed += 1
-    warnings = list(base.warnings)
+    # the bootstrap gives the errors: the plain fit's "could not be estimated" note does not apply
+    warnings = [w for w in base.warnings if not w.startswith(ERRORS_UNKNOWN)]
     if len(boot_params) < 2:
         raise InputError(f"fit_timeseries: only {len(boot_params)} of {n_boot} bootstrap "
                          "resamples could be fitted")
@@ -210,10 +215,14 @@ def fit_timeseries(ts: Table, observable: str, model="power", xrange=None,
             chi2 = float(z @ z)
             if not np.isfinite(chi2):
                 raise _FitFailed("non-finite chi2")
-        except (_FitFailed, np.linalg.LinAlgError):
+        except np.linalg.LinAlgError:
             chi2 = None
-            warnings.append("goodness of fit not assessed: covariance of the replica values "
-                            "at the fitted times is singular")
+            warnings.append(SINGULAR)
+        except _FitFailed as e:
+            chi2 = None
+            warnings.append(SINGULAR if NOT_POSITIVE in str(e) else
+                            f"goodness of fit not assessed: the fit with the replica covariance "
+                            f"did not converge ({e})")
         if chi2 is not None:
             p = float(stats.f.sf(chi2 * (R - dof) / ((R - 1) * dof), dof, R - dof))
             notes.append(f"chi2 correlated: minimised over the parameters with the replica "

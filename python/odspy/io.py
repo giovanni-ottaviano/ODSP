@@ -78,7 +78,7 @@ def _parse_config_lines(lines: list[str], path: Path) -> Provenance:
 
 def _read_lines(path: Path) -> list[str]:
     try:
-        return path.read_text().splitlines()
+        return path.read_text(encoding="utf-8-sig").splitlines()   # a BOM (spreadsheet export) is dropped
     except FileNotFoundError:
         raise InputError(f"{path}: file not found") from None
     except (OSError, UnicodeDecodeError) as e:
@@ -205,6 +205,28 @@ def _reduce_prefix(prefix: str | Path) -> str:
     return s
 
 
+def _hint(given: str, base: Path) -> str:
+    """For a prefix with no outputs: what it should look like, and the prefixes of the ODSP
+    outputs in its folder that are closest to it."""
+    import difflib
+    out = ""
+    if given.endswith(".csv"):
+        out += (f"; {given} " + ("is not an ODSP output file" if Path(given).exists() else "does not exist")
+                + f" (files are named <prefix>_<kind>.csv, kind one of {', '.join(SUFFIXES)})")
+    folder = base.parent if str(base.parent) else Path(".")
+    try:
+        names = [f.name for f in folder.iterdir() if f.name.endswith(".csv")] if folder.is_dir() else []
+    except OSError:
+        names = []
+    found = sorted({f[:m.start()] for f in names if (m := _FILE_RE.search(f))})
+    stem = base.name[:-4] if base.name.endswith(".csv") else base.name
+    close = difflib.get_close_matches(stem, found, n=3, cutoff=0.5)
+    if close:
+        where = "" if str(base.parent) in ("", ".") else str(base.parent) + "/"
+        out += "; did you mean " + " or ".join(where + c for c in close) + "?"
+    return out
+
+
 def find_outputs(prefix: str | Path) -> Outputs:
     pfx = _reduce_prefix(prefix)
     base = Path(pfx)
@@ -227,7 +249,8 @@ def find_outputs(prefix: str | Path) -> Outputs:
         else:
             pts.setdefault(int(m.group(1)), {})[t.kind] = t
     if not top and not pts:
-        raise InputError(f"no ODSP outputs found for prefix {pfx} (looked for {pfx}_*.csv)")
+        raise InputError(f"no ODSP outputs found for prefix {pfx} (looked for {pfx}_*.csv)"
+                         + _hint(str(prefix), base))
     cfg_path = Path(pfx + "_config.txt")
     cfg = None
     if cfg_path.exists():

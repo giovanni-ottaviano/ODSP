@@ -15,7 +15,7 @@ import numpy as np
 from scipy import stats
 from scipy.optimize import OptimizeWarning, curve_fit
 
-from .errors import InputError
+from .errors import InputError, check_threshold
 
 WEIGHTED = "weighted least squares"
 UNWEIGHTED = "unweighted (no error bars)"
@@ -45,7 +45,7 @@ class _FitFailed(Exception):
 
 
 def _check_model(model: str):
-    if model not in _MODELS:
+    if not isinstance(model, str) or model not in _MODELS:
         raise InputError(f"unknown fit model '{model}' (expected one of: {', '.join(_MODELS)})")
     return _MODELS[model]
 
@@ -57,6 +57,10 @@ def _loglog_start(x, y):
         b, lna = np.polyfit(np.log(x[ok]), np.log(y[ok]), 1)
         return math.exp(lna), b
     return (float(np.mean(y) / np.mean(x)) if np.mean(x) != 0 else 1.0), 1.0
+
+
+ERRORS_UNKNOWN = "parameter errors could not be estimated"   # a _core note: errors are inf
+NOT_POSITIVE = "covariance matrix is not positive definite"
 
 
 def _start(model, x, y):
@@ -80,14 +84,14 @@ def _core(model, x, y, sigma=None, p0=None):
             try:
                 L = np.linalg.cholesky(sigma)
             except np.linalg.LinAlgError:
-                raise _FitFailed("covariance matrix is not positive definite") from None
+                raise _FitFailed(NOT_POSITIVE) from None
             Xw, yw = np.linalg.solve(L, X), np.linalg.solve(L, y)
         params, *_ = np.linalg.lstsq(Xw, yw, rcond=None)
         try:
             cov = np.linalg.inv(Xw.T @ Xw)
         except np.linalg.LinAlgError:
             cov = np.full((len(names), len(names)), np.inf)
-            notes.append("parameter errors could not be estimated (degenerate x values)")
+            notes.append(f"{ERRORS_UNKNOWN} (degenerate x values)")
         if sigma is None:
             dof = len(y) - len(names)
             cov = cov * (np.sum((yw - Xw @ params) ** 2) / dof)
@@ -104,7 +108,7 @@ def _core(model, x, y, sigma=None, p0=None):
     if any(issubclass(w.category, OptimizeWarning) for w in caught) or \
             not np.all(np.isfinite(cov)):
         cov = np.full((len(names), len(names)), np.inf)
-        notes.append("parameter errors could not be estimated (singular covariance)")
+        notes.append(f"{ERRORS_UNKNOWN} (singular covariance)")
     return np.asarray(params, float), np.asarray(cov, float), notes
 
 
@@ -199,6 +203,9 @@ def _fit(x, y, yerr=None, model="power", xrange=None, unweighted=False, p_thresh
     from the caller (e.g. points it could not compute), put first in the result's
     warnings. A refusal (too few points) names all of these warnings."""
     names, _, _, _, needs_pos = _check_model(model)
+    p_threshold = check_threshold(p_threshold)
+    if not isinstance(unweighted, (bool, np.bool_)):
+        raise InputError(f"unweighted must be True or False, got {unweighted!r}")
     x, y = _as_array(x, "x"), _as_array(y, "y")
     e = None if yerr is None else _as_array(yerr, "yerr")
     if y.size != x.size or (e is not None and e.size != x.size):

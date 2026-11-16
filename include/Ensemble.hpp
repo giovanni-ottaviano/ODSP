@@ -174,6 +174,13 @@ public:
     explicit Ensemble(ModelFactory factory, unsigned seed = std::random_device{}())
         : _factory(std::move(factory)), _seed_rng(seed) {}
 
+    // Starts at replica `first_replica` of the ensemble with this seed: the
+    // first run() draws the seeds of replicas first_replica, first_replica + 1,
+    // ..., so an ensemble split across several jobs (first_replica 0, R1,
+    // R1 + R2, ...) reproduces, merged, the replicas of a single run.
+    Ensemble(ModelFactory factory, unsigned seed, unsigned long long first_replica)
+        : _factory(std::move(factory)), _seed_rng(seed) { _seed_rng.discard(first_replica); }
+
     // Each replica advances for at most max_steps iterations (sweeps if
     // use_mc_steps, single updates otherwise), stopping early in an absorbing
     // state (Model::is_absorbing_state). threads <= 0 uses all hardware
@@ -242,7 +249,10 @@ Ensemble<T>::run(int replicas, long long max_steps, bool use_mc_steps, int threa
         const typename Model<T>::Observer user = hooks.step ? hooks.step(r) : typename Model<T>::Observer();
         if (user) user(*model);   // the start
         if (model->consensus_is_absorbing()) {
-            out.reached = model->advance(max_steps, use_mc_steps, /*stop_when_absorbed=*/true, user);
+            // A replica that starts absorbed (e.g. in consensus) takes no step.
+            out.reached = model->is_absorbing_state()
+                              ? model->is_consensus_reached()
+                              : model->advance(max_steps, use_mc_steps, /*stop_when_absorbed=*/true, user);
             out.consensus_time = now(*model);
         } else {
             // Consensus can be left again: record the FIRST time it is

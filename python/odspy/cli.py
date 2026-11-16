@@ -23,7 +23,8 @@ from .helpers import (FIRST_PASSAGE_NOTE, consensus_time_vs_size, stationary_cav
                       summarise_replicas, summarise_samples)
 from .io import Outputs, find_outputs
 from .plots import iter_figures, plot_collapse, plot_crossings, plot_fit, save
-from .report import (Report, collapse_lines, crossing_lines, fit_summary, recovered, write)
+from .report import (CORRELATED_PAIRS, Report, collapse_lines, crossing_lines, fit_summary,
+                     recovered, write)
 from .sizes import families
 from .trajectories import (UNTRUSTWORTHY_G, UNTRUSTWORTHY_RUN, fit_timeseries,
                            mark_untrustworthy)
@@ -179,6 +180,8 @@ def cmd_crossings(args) -> tuple[Report, str]:
     rep.lines.extend(crossing_lines(cs, curves[0].label))
     for c in cs:
         rep.warn(*c.warnings)
+    if len({(c.size_a, c.size_b) for c in cs if c.found and math.isfinite(c.err)}) > 1:
+        rep.add(f"  note: {CORRELATED_PAIRS}")
     prov = find_outputs(args.prefix[0]).provenance
     name = f"{_stem(args.prefix[0])}_crossings_{_safe(args.column)}"
     _save(rep, plot_crossings(curves, cs, prov), out, name)
@@ -341,6 +344,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser.parse_args(argv)
     except SystemExit as e:
+        if e.code and argv and argv[0] in COMMANDS and any(Path(".").glob(f"{argv[0]}_*.csv")):
+            print(f"odspy: note: '{argv[0]}' is read as the {argv[0]} command; for the outputs "
+                  f"with prefix {argv[0]} write ./{argv[0]}", file=sys.stderr)
         return e.code if isinstance(e.code, int) else 2
     if args.command is None:
         parser.print_usage(sys.stderr)

@@ -7,11 +7,7 @@ import numpy as np
 from ..io import Table
 from .style import (COARSENING, SE, color, finish, grid, hide_unused, log_axes, masked, new_fig,
                     numeric, positive)
-
-
-def _warn(warnings, text):
-    if warnings is not None:
-        warnings.append(text)
+from .style import warn as _warn
 
 
 def plot_timeseries_run(t: Table, warnings: list[str] | None = None):
@@ -88,8 +84,10 @@ def plot_timeseries_ensemble(t: Table, warnings: list[str] | None = None):
                     ax.set_title(f"{hidden} mean values ≤ 0 not shown", fontsize=7)
             ax.set_xlabel("time (t=0 not shown on log axes)" if log else "time")
             ax.set_ylabel(o)
-            ax.legend(loc="best")
         hide_unused(axes, len(obs))
+        # one legend above the panels (the same entries in each): inside an axes it covers curves
+        handles, labels = axes.ravel()[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="outside upper center", ncols=len(labels), fontsize=7)
         figs.append(("timeseries_ensemble", finish(fig, t.provenance)))
     panels = [n for n in ("running_fraction", "survival") if t.has(n)]
     if panels:

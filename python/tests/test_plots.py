@@ -159,13 +159,15 @@ def test_stationary_flagged_points(tmp_path):
     rows += ["2.0,0.9,0.01,1.0,1.0,1", "2.3,0.5,0.05,40.0,40.0,1"]
     (tmp_path / "s_sweep.csv").write_text(
         cfg(task="stationary", model="ising", dims="8x8", sweep="temperature=2.0,2.3",
-            samples="100", blocks="20") + "\n".join(rows) + "\n")
+            samples="1000", blocks="20") + "\n".join(rows) + "\n")
     figs, warns = figures_for(find_outputs(str(tmp_path / "s")))
-    assert any("temperature=2.3" in w and "autocorrelation time" in w for w in warns)
-    labels = [lab for _, f in figs for ax in f.axes for lab in ax.get_legend_handles_labels()[1]]
-    assert any("jackknife error" in s for s in labels)
     for _, f in figs:
         plt.close(f)
+    short = [w for w in warns if "autocorrelation time" in w]
+    assert len(short) == 1 and "at 1 of 2 points (temperature=2.3)" in short[0]
+    labels = [lab for _, f in figs for ax in f.axes for lab in ax.get_legend_handles_labels()[1]]
+    assert any("jackknife error" in s for s in labels)
+    assert any("open marker" in s for s in labels)     # the flagged point is drawn open
 
 
 def test_domains_log_binned(outputs):
@@ -414,5 +416,33 @@ def test_unexpected_error_in_vs_key_figure_skips_only_it(outputs, monkeypatch):
     figs, warns = figures_for(find_outputs(outputs["cont"]))
     assert any("clusters vs key skipped" in w and "RuntimeError: vs key exploded" in w for w in warns)
     assert figs
+    for _, f in figs:
+        plt.close(f)
+
+
+def test_survival_line_reaches_the_frozen_and_censored_markers(tmp_path):
+    from odspy.plots import plot_replicas
+    from odspy.io import read_table
+    p = tmp_path / "k_replicas.csv"
+    p.write_text(cfg(task="ensemble", model="majority", dims="8x8")
+                 + "replica,reached_consensus,absorbed,stop_time\n"
+                   "0,1,1,10\n1,1,1,20\n2,0,1,50\n3,0,0,80\n")
+    figs = plot_replicas(read_table(p))
+    fig = dict(figs)["replicas_stoptime"]
+    ax = fig.axes[1]
+    km = [ln for ln in ax.lines if ln.get_label() == "survival (Kaplan-Meier)"][0]
+    assert max(km.get_xdata()) == 80 and km.get_ydata()[-1] == 0.5
+    markers = [ln for ln in ax.lines if ln is not km]
+    assert max(max(m.get_xdata()) for m in markers) <= max(km.get_xdata())
+    for _, f in figs:
+        plt.close(f)
+
+
+def test_ensemble_timeseries_legend_outside_the_panels(outputs):
+    figs = plot_timeseries_ensemble(find_outputs(outputs["ens"]).get("timeseries_ensemble"))
+    fig = dict(figs)["timeseries_ensemble"]
+    assert all(ax.get_legend() is None for ax in fig.axes)
+    assert len(fig.legends) == 1
+    assert "mean" in [t.get_text() for t in fig.legends[0].get_texts()]
     for _, f in figs:
         plt.close(f)

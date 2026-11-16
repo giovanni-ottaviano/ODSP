@@ -194,3 +194,22 @@ def test_nan_x_counted_with_range():
     y2[0] = np.nan
     r = fit(X20, y2, e, xrange=(100, 2000))
     assert not any("NaN" in w for w in r.warnings)
+
+
+@pytest.mark.parametrize("kw", [dict(p_threshold="a"), dict(p_threshold=None), dict(p_threshold=1.5),
+                                dict(model=["power"]), dict(model=3), dict(unweighted="no")])
+def test_fit_rejects_bad_argument_types(kw):
+    x = np.linspace(1, 10, 10)
+    with pytest.raises(InputError):
+        fit(x, x ** 0.5, np.full(10, 0.01), **kw)
+
+
+@pytest.mark.parametrize("seed", ["a", 1.5, -1, True, None])
+def test_seeded_calls_reject_bad_seeds(seed):
+    from odspy import find_crossings, search_collapse
+    from synthetic import crossing_model, curve, scaling_curves
+    x = np.linspace(2.2, 2.34, 8)
+    with pytest.raises(InputError, match="seed must be a non-negative integer"):
+        find_crossings([curve(L, x, crossing_model(L, x)) for L in (8, 16)], n_boot=10, seed=seed)
+    with pytest.raises(InputError, match="seed must be a non-negative integer"):
+        search_collapse(scaling_curves(), 2.27, 1.0, 0.25, n_boot=10, seed=seed, starts=1)

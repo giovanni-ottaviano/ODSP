@@ -69,21 +69,40 @@ def fit_summary(r: FitResult) -> tuple[str, list[str]]:
 
 
 def crossing_lines(cs: list[Crossing], label: str) -> list[str]:
+    """One line per size pair; a pair whose curves cross several times gets them on
+    indented lines under a header that says they are not separate measurements."""
     out = []
+    pairs: dict[tuple[float, float], list[Crossing]] = {}
     for c in cs:
-        pair = f"{label}={c.size_a:g} vs {label}={c.size_b:g}"
-        if not c.found:
-            out.append(f"  {pair}: {c.note or 'no crossing in range'}")
-        elif math.isfinite(c.err):
-            out.append(f"  {pair}: x = {c.x:.6g} ± {c.err:.2g}, y = {c.y:.6g}  ({c.method})")
+        pairs.setdefault((c.size_a, c.size_b), []).append(c)
+    for (a, b), group in pairs.items():
+        pair = f"{label}={a:g} vs {label}={b:g}"
+        found = [c for c in group if c.found]
+        if not found:
+            out.append(f"  {pair}: {group[0].note or 'no crossing in range'}")
+            continue
+        if len(found) > 1:
+            out.append(f"  {pair}: the curves cross {len(found)} times (noise where they nearly "
+                       "coincide, or a difference that changes sign more than once); they are not "
+                       "independent measurements of one crossing point")
+            indent = "    "
         else:
-            out.append(f"  {pair}: x = {c.x:.6g} (no error: {c.method}), y = {c.y:.6g}")
+            indent = "  " + pair + ": "
+        for c in found:
+            if math.isfinite(c.err):
+                out.append(f"{indent}x = {c.x:.6g} ± {c.err:.2g}, y = {c.y:.6g}  ({c.method})")
+            else:
+                out.append(f"{indent}x = {c.x:.6g} (no error: {c.method}), y = {c.y:.6g}")
     return out
+
+
+CORRELATED_PAIRS = ("crossings of adjacent pairs share a curve, so their errors are correlated: do "
+                    "not combine them as independent (e.g. for the error of a drift)")
 
 
 def collapse_lines(r: CollapseResult) -> list[str]:
     s = "undefined" if not math.isfinite(r.quality) else f"{r.quality:.3g}"
-    lines = [f"collapse: S = {s} from {r.points_used} of {r.points_total} points; {r.method}"]
+    lines = [f"collapse: S = {s}; {r.method}"]      # the method ends with "S from n of m points"
     for k, v in (("xc", r.xc), ("nu", r.nu), ("a", r.a)):
         if k in r.fixed:
             lines.append(f"  {k} = {v:.6g} (fixed)")

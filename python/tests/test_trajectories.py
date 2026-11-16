@@ -211,11 +211,11 @@ def test_poor_bootstrap_fit_scales_its_errors(monkeypatch):
 
 
 def test_good_bootstrap_fit_is_not_scaled():
-    rng = np.random.default_rng(23)
+    rng = np.random.default_rng(24)
     ts, tr = tables(ensemble(rng, 60))
     r = fit_timeseries(ts, "y", trajectories=tr, n_boot=50)
-    if r.chi2 <= r.chi2_expected:
-        assert r.scaled is False and "errors scaled" not in r.summary()
+    assert r.chi2 <= r.chi2_expected                 # the fixture: T^2 below its expectation
+    assert r.scaled is False and "errors scaled" not in r.summary()
 
 
 def test_unassessed_bootstrap_fit_says_errors_exclude_misfit():
@@ -224,3 +224,36 @@ def test_unassessed_bootstrap_fit_says_errors_exclude_misfit():
     r = fit_timeseries(ts, "y", trajectories=tr, n_boot=50)
     assert r.scaled is False
     assert any("do not include any misfit" in n for n in r.notes)
+
+
+def test_correlated_fit_not_converging_is_not_called_singular(monkeypatch):
+    import odspy.trajectories as T
+    from odspy.fits import _FitFailed
+    rng = np.random.default_rng(25)
+    ts, tr = tables(ensemble(rng, 60))
+    real = T._core
+
+    def gls_fails(model, x, y, sigma=None, p0=None):
+        if sigma is not None and np.ndim(sigma) == 2:
+            raise _FitFailed("maxfev reached")
+        return real(model, x, y, sigma, p0)
+    monkeypatch.setattr(T, "_core", gls_fails)
+    r = fit_timeseries(ts, "y", trajectories=tr, n_boot=30)
+    assert r.chi2 is None
+    assert any("did not converge (maxfev reached)" in w for w in r.warnings)
+    assert not any("singular" in w for w in r.warnings)
+
+
+def test_bootstrap_errors_drop_the_plain_fits_unknown_errors_note(monkeypatch):
+    import odspy.fits as F
+    rng = np.random.default_rng(26)
+    ts, tr = tables(ensemble(rng, 60))
+    real = F._core
+
+    def no_errors(model, x, y, sigma=None, p0=None):
+        params, cov, notes = real(model, x, y, sigma, p0)
+        return params, np.full_like(cov, np.inf), notes + [f"{F.ERRORS_UNKNOWN} (singular covariance)"]
+    monkeypatch.setattr(F, "_core", no_errors)       # the plain fit only: the bootstrap uses its own
+    r = fit_timeseries(ts, "y", trajectories=tr, n_boot=30)
+    assert all(np.isfinite(v) for v in r.errors.values())
+    assert not any(F.ERRORS_UNKNOWN in w for w in r.warnings + r.notes)

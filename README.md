@@ -141,6 +141,14 @@ odsp --model deffuant --epsilon 0.2 --graph complete --n 1000 --task ensemble --
   replica) or `--init-fill <opinion>` fills them; entries for nodes not in the
   graph are counted and skipped. Every replica starts from the file, and
   `--zealots` still applies on top.
+- **Splitting an ensemble across jobs**: `--first-replica k` (ensemble) runs
+  replicas k..k+R−1 of the ensemble with that seed, labelled k, k+1, ... in
+  every per-replica file (replicas, trajectories, states, domains, clusters).
+  Jobs with the same seed and `--first-replica 0`, `R1`, `R1+R2`, ... write,
+  concatenated, exactly the per-replica rows of one run with all the
+  replicas; in a sweep the offset applies at every point. Aggregated files
+  (`_timeseries.csv`, `_sweep.csv`, `_fixation.csv`) cover each job's own
+  replicas only. A replica that starts in consensus stops at time 0.
 - **Saving trajectories**: `--save-trajectories true` (ensemble with
   `--every` or `--log-times`, and `--csv prefix`) writes every replica's time
   series to `prefix_trajectories.csv` (`prefix_point<i>_trajectories.csv` in
@@ -405,7 +413,10 @@ figures go to the same folder as PDF and PNG. Malformed input gives
 `odspy: error: <message>` on stderr and exit status 2; an evaluation flagged poor
 is reported, not an error (exit 0); a figure that cannot be drawn is skipped and
 named under `Warnings:`; any other failure is a bug, reported as
-`odspy: internal error: ...` with exit status 3.
+`odspy: internal error: ...` with exit status 3. A prefix with no outputs gets
+the closest prefixes in its folder as suggestions; a prefix named like a command
+(`fit`, `plot`, ...) is written `./fit`. Files from `--first-replica` runs
+(replica labels starting at k) are read as they are.
 
     # every standard figure that applies ("plot" is implied); a single ensemble
     # or stationary run also gets the driver's summary recomputed from its files
@@ -421,6 +432,7 @@ named under `Warnings:`; any other failure is a bug, reported as
     # fits: a time series against time (bootstrap over replicas) ...
     python/.venv/bin/odspy fit out/ens --x time --y length --range 2:40 --model power
     # ... or the mean consensus time against system size (several runs or one dims sweep)
+    odsp --model voter --task ensemble --sweep dims=6x6,8x8,12x12,16x16 --replicas 50 --csv out/es
     python/.venv/bin/odspy fit out/es --y mean_consensus_time --censored median
 
     # data collapse, with the given parameters or searching from them
@@ -492,8 +504,14 @@ The suite never looks more certain than the data is:
   within 20%, farther than 2 errors) is named in a "start-dependent" warning;
 - a fit refused for too few points names the points it excluded and why;
 - a crossing outside the sampled range is "no crossing in range", never
-  extrapolated; stationary sweeps warn when jackknife blocks are not much longer
-  than the autocorrelation time.
+  extrapolated; curves that cross several times are reported as one pair with
+  several crossings, not as independent measurements, and crossings of adjacent
+  pairs are noted as correlated (they share a curve);
+- stationary sweeps carry the driver's checks, one line per kind naming the
+  points: jackknife blocks not much longer than the autocorrelation time of |x|
+  (every error may be underestimated), x changing sign only rarely (only the
+  plain mean's error is unreliable), and chains that disagree far beyond their
+  own errors (not equilibrated).
 
 Library entry points (`import odspy`): `find_outputs`, `read_table`, `families`,
 `fit`, `fit_timeseries`, `find_crossings`, `collapse`, `search_collapse`,

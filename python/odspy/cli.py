@@ -22,6 +22,7 @@ from .fits import fit
 from .helpers import (FIRST_PASSAGE_NOTE, consensus_time_vs_size, stationary_caveats,
                       summarise_replicas, summarise_samples)
 from .io import Outputs, find_outputs
+from .merge import merge
 from .plots import iter_figures, plot_collapse, plot_crossings, plot_fit, save
 from .report import (CORRELATED_PAIRS, Report, collapse_lines, crossing_lines, fit_summary,
                      recovered, write)
@@ -29,7 +30,7 @@ from .sizes import families
 from .trajectories import (UNTRUSTWORTHY_G, UNTRUSTWORTHY_RUN, fit_timeseries,
                            mark_untrustworthy)
 
-COMMANDS = ("plot", "crossings", "fit", "collapse")
+COMMANDS = ("plot", "crossings", "fit", "collapse", "merge")
 MODELS = ("power", "power+c", "log", "line")
 
 
@@ -37,7 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="odspy", description="Figures and evaluations of ODSP outputs (odsp --csv PREFIX).",
         epilog="If the first argument is not a command, 'plot' is implied.")
-    sub = p.add_subparsers(dest="command", metavar="{plot,crossings,fit,collapse}")
+    sub = p.add_subparsers(dest="command", metavar="{plot,crossings,fit,collapse,merge}")
 
     def common(q):
         q.add_argument("prefix", nargs="+", metavar="PREFIX",
@@ -84,6 +85,11 @@ def _parser() -> argparse.ArgumentParser:
                         "(1 to 15, default 15; 1 = the given values alone)")
     q.add_argument("--size", choices=("auto", "L", "N"), default="auto")
     q.add_argument("--boot", type=int, default=200, help="bootstrap minimisations for the errors")
+
+    q = sub.add_parser("merge", help="join replica blocks and sweep points of one run into one prefix")
+    q.add_argument("merged", metavar="OUT", help="prefix of the merged outputs")
+    q.add_argument("inputs", nargs="+", metavar="IN",
+                   help="output prefixes of the jobs (--first-replica blocks, --sweep-point points)")
     return p
 
 
@@ -107,6 +113,8 @@ def _safe(name: str) -> str:
 
 
 def _outdir(args) -> Path:
+    if args.command == "merge":
+        return Path(args.merged).parent
     if args.out is not None:
         return Path(args.out)
     return Path(find_outputs(args.prefix[0]).prefix).parent
@@ -333,7 +341,24 @@ def cmd_collapse(args) -> tuple[Report, str]:
     return rep, name
 
 
-HANDLERS = {"plot": cmd_plot, "crossings": cmd_crossings, "fit": cmd_fit, "collapse": cmd_collapse}
+def cmd_merge(args) -> tuple[Report, str]:
+    rep = Report()
+    merged = merge(args.merged, args.inputs)
+    rep.add(f"Merged {len(args.inputs)} input(s) into {merged.prefix}:")
+    rep.files("Inputs", args.inputs)
+    rep.add()
+    tables = [t for o in (merged, *(merged.points[i] for i in sorted(merged.points)))
+              for t in o.tables.values()]
+    rep.files("Files written", [Path(merged.prefix + "_config.txt"), *(t.path for t in tables)])
+    cfg = merged.provenance.config
+    rep.add()
+    rep.add(f"Merged run: task {cfg.get('task')}, replicas {cfg.get('replicas')}"
+            + (f", sweep {cfg['sweep']}" if cfg.get("sweep") else ""))
+    return rep, Path(merged.prefix).name + "_merge"
+
+
+HANDLERS = {"plot": cmd_plot, "crossings": cmd_crossings, "fit": cmd_fit, "collapse": cmd_collapse,
+            "merge": cmd_merge}
 
 
 def main(argv: list[str] | None = None) -> int:

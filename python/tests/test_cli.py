@@ -364,3 +364,19 @@ def test_different_models_names_a_file_without_provenance(outputs, tmp_path):
     with pytest.raises(InputError) as e:
         families([outputs["ens_sweep"], str(tmp_path / "bare")], "mean_consensus_time")
     assert "model unknown: no provenance" in str(e.value) and "None" not in str(e.value)
+
+
+def test_cli_merge(odsp_bin, tmp_path, capsys):
+    base = "--model voter --dims 6x6 --task ensemble --steps 50 --seed 4"
+    a = odsp_run(odsp_bin, tmp_path, "a", base + " --replicas 4")
+    b = odsp_run(odsp_bin, tmp_path, "b", base + " --replicas 5 --first-replica 4")
+    out = str(tmp_path / "merged")
+    code, stdout, err = run(["merge", out, a, b], capsys)
+    assert code == 0, err
+    assert Path(out + "_replicas.csv").exists()
+    report = Path(out + "_merge_report.txt")
+    assert report.exists() and str(Path(out + "_replicas.csv")) in report.read_text()
+    assert a in stdout and b in stdout
+    c = odsp_run(odsp_bin, tmp_path, "c", base.replace("--seed 4", "--seed 5") + " --replicas 5 --first-replica 4")
+    code, stdout, err = run(["merge", str(tmp_path / "bad"), a, c], capsys)
+    assert code == 2 and "seed" in err and "odspy: error" in err

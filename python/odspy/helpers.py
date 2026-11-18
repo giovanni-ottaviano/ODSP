@@ -473,9 +473,19 @@ def _points_text(labels: list[str], n: int) -> str:
 def stationary_flags(table: Table) -> dict[str, np.ndarray]:
     """Per point of a stationary sweep table, the driver's checks:
     'short' -- jackknife blocks (samples / blocks) shorter than 10 tau_abs: every error may
-    be underestimated; 'sign' -- blocks long against tau_abs but shorter than 10 tau (x
-    changes sign rarely): only the plain mean's error is unreliable; 'disagree' -- chains
-    disagreeing by more than 3x their own errors on |mean| or Binder (not equilibrated)."""
+    be underestimated; 'sign' -- x changes sign rarely: with one chain, blocks long against
+    tau_abs but shorter than 10 tau (only the plain mean's error is unreliable); with
+    several, each chain shorter than 50 tau and tau > 2 tau_abs (chains started alike are
+    biased the same way, which the spread between them does not show: the plain mean and N
+    var(x) may be biased; an x that keeps its sign has tau = tau_abs and is not flagged, nor
+    is any point when the configuration has no `samples`); 'disagree' -- chains disagreeing by more than 3x their own errors on |mean| or
+    Binder (not equilibrated). 'short' concerns the jackknife within one chain, so it is
+    raised only at points with one chain: with several, the errors are leave-one-chain-out
+    (between independent chains) and do not depend on the block length. The several-chain
+    'sign' rule uses 50 tau, not 10, because tau is estimated within each chain and
+    saturates near (chain length) / 15 when the true tau is longer (the driver's rule;
+    src/driver/Tasks.hpp): 10 tau would never be reached. Chains that never flip show tau
+    ~ tau_abs and cannot be flagged."""
     config = _config(table)
     blocks = _cfg_int(config, "blocks", 20)
     samples = _cfg_int(config, "samples", 0)
@@ -486,11 +496,15 @@ def stationary_flags(table: Table) -> dict[str, np.ndarray]:
         return _num(table, name).astype(float) if table.has(name) else np.full(n, np.nan)
 
     tau, tau_abs = col("tau"), col("tau_abs")
+    chains = col("chains") if table.has("chains") \
+        else np.full(n, float(_cfg_int(config, "replicas", 1)))
     with np.errstate(invalid="ignore"):
-        short = np.isfinite(tau_abs) & (block < 10.0 * tau_abs)
-        sign = ~short & np.isfinite(tau) & (block < 10.0 * tau)
+        one = ~(chains > 1)
+        short = one & np.isfinite(tau_abs) & (block < 10.0 * tau_abs)
+        sign = np.isfinite(tau) & np.where(
+            one, ~short & (block < 10.0 * tau),
+            (samples > 0) & (samples < 50.0 * tau) & (tau > 2.0 * tau_abs))
         disagree = np.zeros(n, bool)
-        chains = col("chains")
         for name in ("abs_mean", "binder"):
             err, within = col(name + "_err"), col(name + "_err_within")
             disagree |= (chains > 1) & (err > 3.0 * within)
@@ -500,8 +514,10 @@ def stationary_flags(table: Table) -> dict[str, np.ndarray]:
 def stationary_caveats(table: Table) -> list[str]:
     """Caveats of a stationary sweep table, one line per kind, each naming the file and the
     points it concerns: jackknife blocks short against tau_abs (all errors may be
-    underestimated), rare sign changes (only the plain mean's error), chains that disagree,
-    and how uncertain the error bars themselves are (one line per number of chains)."""
+    underestimated, one-chain points only), rare sign changes (one line for one-chain
+    points: the plain mean's error; one for several-chain points: the plain mean and N
+    var(x) may be biased; see stationary_flags), chains that disagree, and how uncertain the
+    error bars themselves are (one line per number of chains)."""
     config = _config(table)
     blocks = _cfg_int(config, "blocks", 20)
     samples = _cfg_int(config, "samples", 0)
@@ -522,12 +538,22 @@ def stationary_caveats(table: Table) -> list[str]:
                    f"autocorrelation time {_points_text([labels[i] for i in idx], n)} "
                    f"(tau_abs up to {top:.3g}); errors may be underestimated (use more --samples "
                    "or a larger --interval)")
-    if flags["sign"].any():
-        idx = np.flatnonzero(flags["sign"])
+    several = _num(table, "chains").astype(float) > 1 if table.has("chains") \
+        else np.full(n, _cfg_int(config, "replicas", 1) > 1)
+    if (flags["sign"] & ~several).any():
+        idx = np.flatnonzero(flags["sign"] & ~several)
         top = float(np.nanmax(_num(table, "tau")[idx]))
         out.append(f"{where}x changes sign only rarely {_points_text([labels[i] for i in idx], n)} "
                    f"(autocorrelation up to {top:.3g} samples), so the error of the plain mean is "
-                   "unreliable there; |mean|, susceptibility and Binder are fine")
+                   "unreliable there; |mean|, abs_susceptibility and Binder are fine")
+    if (flags["sign"] & several).any():
+        idx = np.flatnonzero(flags["sign"] & several)
+        top = float(np.nanmax(_num(table, "tau")[idx]))
+        out.append(f"{where}x changes sign only rarely within a chain "
+                   f"{_points_text([labels[i] for i in idx], n)} (autocorrelation up to "
+                   f"{top:.3g} samples, chains of {samples} samples) and the chains may start "
+                   "alike: the plain mean and N var(x), and their errors, may be biased; "
+                   "|mean|, abs_susceptibility and Binder are fine")
     if flags["disagree"].any():
         idx = np.flatnonzero(flags["disagree"])
         out.append(f"{where}the chains disagree far more than their own errors allow (|mean| or "

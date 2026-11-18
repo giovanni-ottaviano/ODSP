@@ -6,7 +6,8 @@ import pytest
 from odspy.errors import InputError
 from odspy.helpers import (Recovered, consensus_time_vs_size, error_bar_uncertainty,
                            log_growth_vs_size, peak_vs_size, slope_at_crossing_vs_size,
-                           stationary_caveats, summarise_replicas, summarise_samples)
+                           stationary_caveats, stationary_flags, summarise_replicas,
+                           summarise_samples)
 from odspy.io import Provenance, Table, find_outputs, read_table
 from odspy.sizes import SizeCurve
 
@@ -204,22 +205,60 @@ def test_error_bar_uncertainty():
 
 
 def test_stationary_caveats():
-    t = sweep_table([{"temperature": 2.0, "tau_abs": 1.0, "chains": 10},
-                     {"temperature": 2.3, "tau_abs": 40.0, "chains": 10}],
+    t = sweep_table([{"temperature": 2.0, "tau_abs": 1.0, "chains": 1},
+                     {"temperature": 2.3, "tau_abs": 40.0, "chains": 1}],
                     samples=1000, blocks=20, sweep="temperature=2.0,2.3")
     caveats = stationary_caveats(t)
-    short = [c for c in caveats if "jackknife blocks" in c]
+    short = [c for c in caveats if "not much longer" in c]
     assert len(short) == 1 and "at 1 of 2 points (temperature=2.3)" in short[0]
     assert short[0].startswith("syn_sweep.csv: ") and "tau_abs up to 40" in short[0]
     notes = [c for c in caveats if "uncertain" in c]
-    assert notes == ["syn_sweep.csv: error bars from 10 chains are themselves uncertain by "
-                     "about +-24% (more --replicas narrow them)"]
+    assert notes == ["syn_sweep.csv: error bars from 20 jackknife blocks are themselves "
+                     "uncertain by about +-16%"]
+
+
+def test_stationary_caveats_several_chains_no_block_caveats():
+    # Several chains: errors are leave-one-chain-out, independent of the jackknife block
+    # length, so the short-block caveat does not apply (blocks of 50 < 10 tau_abs = 400 at
+    # T = 2.3). The sign note for several chains needs tau(x) > 2 tau(|x|): the T = 2.3 row
+    # (tau = tau_abs = 40, chains of 1000 < 50 tau) is not flagged, since x there need not
+    # change sign at all; the T = 2.0 row (tau = 15 tau_abs, chains of 1000 < 50 tau) is.
+    t = sweep_table([{"temperature": 2.0, "tau": 30.0, "tau_abs": 2.0, "chains": 10},
+                     {"temperature": 2.3, "tau": 40.0, "tau_abs": 40.0, "chains": 10}],
+                    samples=1000, blocks=20, sweep="temperature=2.0,2.3")
+    caveats = stationary_caveats(t)
+    assert not any("not much longer" in c for c in caveats), caveats
+    sign = [c for c in caveats if "changes sign" in c]
+    assert len(sign) == 1 and "(temperature=2)" in sign[0], sign
+    assert caveats[-1] == ("syn_sweep.csv: error bars from 10 chains are themselves uncertain "
+                           "by about +-24% (more --replicas narrow them)")
+    flags = stationary_flags(t)
+    assert not flags["short"].any() and list(flags["sign"]) == [True, False]
+
+
+def test_stationary_flags_sign_several_chains_needs_samples():
+    # Without `samples` in the configuration the chain length is unknown: no several-chain
+    # sign flag (rather than flagging every point against a length of 0).
+    t = sweep_table([{"temperature": 2.0, "tau": 30.0, "tau_abs": 2.0, "chains": 8}],
+                    blocks=20, sweep="temperature=2.0")
+    assert not stationary_flags(t)["sign"].any()
+    assert not any("changes sign" in c for c in stationary_caveats(t))
+
+
+def test_stationary_flags_per_point_chains():
+    # A merged table may mix one-chain and several-chain points: flag only the former.
+    t = sweep_table([{"temperature": 2.0, "tau": 40.0, "tau_abs": 40.0, "chains": 1},
+                     {"temperature": 2.3, "tau": 40.0, "tau_abs": 40.0, "chains": 4}],
+                    samples=1000, blocks=20, sweep="temperature=2.0,2.3")
+    assert list(stationary_flags(t)["short"]) == [True, False]
+    short = [c for c in stationary_caveats(t) if "not much longer" in c]
+    assert len(short) == 1 and "(temperature=2)" in short[0]
 
 
 def test_stationary_caveats_one_line_per_kind():
-    rows = [{"temperature": 2.0 + 0.1 * i, "tau_abs": 40.0, "chains": 4} for i in range(6)]
+    rows = [{"temperature": 2.0 + 0.1 * i, "tau_abs": 40.0, "chains": 1} for i in range(6)]
     t = sweep_table(rows, samples=1000, blocks=20, sweep="temperature=2.0:2.5:0.1")
-    short = [c for c in stationary_caveats(t) if "jackknife blocks" in c]
+    short = [c for c in stationary_caveats(t) if "not much longer" in c]
     assert len(short) == 1 and "at all 6 points" in short[0]
 
 
@@ -232,6 +271,40 @@ def test_stationary_caveats_rare_sign_changes():
     assert not any("not much longer" in c for c in caveats)
     sign = [c for c in caveats if "changes sign only rarely" in c]
     assert len(sign) == 1 and "(temperature=2)" in sign[0] and "plain mean" in sign[0]
+    assert "|mean|, abs_susceptibility and Binder are fine" in sign[0]
+
+
+def test_stationary_caveats_rare_sign_changes_several_chains():
+    # Several chains started alike that rarely flip are biased the same way, which the
+    # leave-one-chain-out errors do not show: flagged when each chain is shorter than
+    # 50 tau(x) (the per-chain tau estimate saturates near chain length / 15 when too
+    # short), whatever the block length; not flagged for chains long against tau(x).
+    t = sweep_table([{"temperature": 2.0, "tau": 30.0, "tau_abs": 2.0, "chains": 8},
+                     {"temperature": 2.2, "tau": 15.0, "tau_abs": 2.0, "chains": 8},
+                     {"temperature": 2.5, "tau": 2.0, "tau_abs": 1.0, "chains": 8}],
+                    samples=1000, blocks=20, sweep="temperature=2.0,2.2,2.5")
+    assert list(stationary_flags(t)["sign"]) == [True, False, False]
+    caveats = stationary_caveats(t)
+    sign = [c for c in caveats if "changes sign only rarely" in c]
+    assert len(sign) == 1 and "(temperature=2)" in sign[0], caveats
+    assert "within a chain" in sign[0]
+    assert "the plain mean and N var(x), and their errors, may be biased" in sign[0]
+    assert "|mean|, abs_susceptibility and Binder are fine" in sign[0]
+    assert not any("not much longer" in c for c in caveats)
+
+
+def test_stationary_flags_sign_mixed_chains():
+    # One-chain points keep the block rule (block 50 < 10 tau = 300), several-chain points
+    # the chain-length rule (1000 >= 50 tau = 1000 at tau = 20: not flagged).
+    t = sweep_table([{"temperature": 2.0, "tau": 30.0, "tau_abs": 2.0, "chains": 1},
+                     {"temperature": 2.1, "tau": 20.0, "tau_abs": 2.0, "chains": 4},
+                     {"temperature": 2.2, "tau": 21.0, "tau_abs": 2.0, "chains": 4}],
+                    samples=1000, blocks=20, sweep="temperature=2.0,2.1,2.2")
+    assert list(stationary_flags(t)["sign"]) == [True, False, True]
+    sign = [c for c in stationary_caveats(t) if "changes sign only rarely" in c]
+    assert len(sign) == 2, sign
+    assert "(temperature=2)" in sign[0] and "within a chain" not in sign[0]
+    assert "(temperature=2.2)" in sign[1] and "within a chain" in sign[1]
 
 
 def test_stationary_caveats_chains_disagree():

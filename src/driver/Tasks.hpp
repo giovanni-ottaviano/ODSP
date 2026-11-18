@@ -903,15 +903,33 @@ Row task_stationary(const TaskParams& t, const Setup<T>& s, unsigned seed, const
                 std::cout << "    " << std::setw(10) << fmt(lo + (hi - lo) * (r + 0.5) / rows, 4) << " | "
                           << std::string(peak ? merged[r] * 40 / peak : 0, '#') << '\n';
         }
-        // |mean|, the susceptibilities and the Binder cumulant depend on |x| and
+        // |mean|, abs_susceptibility and the Binder cumulant depend on |x| and
         // x^2 only, so tau(|x|) governs their errors; tau(x) can be much longer
-        // when the sign of x flips rarely, and then only the plain mean suffers.
-        if (block < 10.0 * tau_abs)
+        // when the sign of x flips rarely, and then the plain mean (and N var(x),
+        // which contains it) suffers. With one chain both checks concern the
+        // jackknife blocks. With several chains the errors are leave-one-chain-out
+        // and do not depend on the block length, but chains started alike (e.g.
+        // ordered starts) that rarely flip are biased the same way, which the
+        // spread between them does not show: so the sign NOTE compares each
+        // chain's length with tau(x). tau(x) is estimated within each chain and
+        // saturates near (chain length)/15 when the true tau(x) is longer (the
+        // window closes on the mean-subtracted autocorrelation; Ising 8x8 below
+        // T_c, 36 chain lengths and temperatures: samples / tau(x) never below 15),
+        // so "chain shorter than 10 tau(x)" would never fire: 50 tau(x) flags
+        // the saturated estimates. It also needs tau(x) > 2 tau(|x|): an x that
+        // keeps its sign (an order parameter >= 0, an energy) has tau(x) =
+        // tau(|x|) and nothing to flip. Flips that never happen in any chain
+        // leave tau(x) ~ tau(|x|) too, so they cannot be seen at all.
+        if (R == 1 && block < 10.0 * tau_abs)
             std::cout << "  WARNING: jackknife blocks of " << fmt(block, 3) << " samples are not much longer than the"
                       << " autocorrelation time; errors may be underestimated (use more --samples or a larger --interval).\n";
-        else if (block < 10.0 * tau)
+        else if (R == 1 && block < 10.0 * tau)
             std::cout << "  NOTE: x changes sign only rarely (autocorrelation " << fmt(tau, 3) << " samples), so the"
-                      << " error of the plain mean is unreliable; |mean|, susceptibility and Binder are fine.\n";
+                      << " error of the plain mean is unreliable; |mean|, abs_susceptibility and Binder are fine.\n";
+        else if (R > 1 && static_cast<double>(t.samples) < 50.0 * tau && tau > 2.0 * tau_abs)
+            std::cout << "  NOTE: x changes sign only rarely within a chain (autocorrelation " << fmt(tau, 3)
+                      << " samples, chains of " << t.samples << ") and the chains may start alike: the plain mean and"
+                      << " N var(x), and their errors, may be biased; |mean|, abs_susceptibility and Binder are fine.\n";
         // Chains that disagree far beyond their own errors have not reached the
         // same stationary state (burn-in too short, or stuck in different
         // states). Checked on sign-independent quantities: the sign of x may

@@ -149,6 +149,13 @@ odsp --model deffuant --epsilon 0.2 --graph complete --n 1000 --task ensemble --
   replicas; in a sweep the offset applies at every point. Aggregated files
   (`_timeseries.csv`, `_sweep.csv`, `_fixation.csv`) cover each job's own
   replicas only. A replica that starts in consensus stops at time 0.
+- **Splitting a sweep across jobs**: `--sweep-point i` (with `--sweep`, and
+  `--sweep2`) validates the whole grid but runs only point i (0-based,
+  `--sweep` outer, `--sweep2` inner), with the seed it gets in the full run.
+  It writes `prefix_sweep.csv` with the full run's header and that one row,
+  the point's own files as `prefix_point<i>_*.csv`, and `sweep-point = i` in
+  the config. It combines with `--first-replica`. `odspy merge` joins the
+  parts of a split sweep.
 - **Saving trajectories**: `--save-trajectories true` (ensemble with
   `--every` or `--log-times`, and `--csv prefix`) writes every replica's time
   series to `prefix_trajectories.csv` (`prefix_point<i>_trajectories.csv` in
@@ -439,6 +446,22 @@ the closest prefixes in its folder as suggestions; a prefix named like a command
     python/.venv/bin/odspy collapse out/st --column binder --xc 2.269 --nu 1 --a 0
     python/.venv/bin/odspy collapse out/st --column binder --xc 2.269 --nu 1 --search --fix-a
 
+Merging (`odspy merge OUT IN [IN ...]`): a large ensemble can be split across
+cluster jobs, each running one replica block (`--first-replica k --replicas R`)
+and/or one sweep point (`--sweep-point i`). `odspy merge` joins their outputs
+into the prefix `OUT`, which every other command then reads as if it came from
+one run: per-replica files are concatenated in replica order, ensemble time
+series, G(r) and fixation counts recombined exactly from the blocks, sweep rows
+recomputed from the merged replicas files (the point files are kept as
+`OUT_point<i>_*`, the sweep table in point order). It refuses, naming the
+inputs, configurations that differ (apart from `csv`, `threads`,
+`first-replica`, `sweep-point`, `replicas`), different ODSP versions or
+commits, replica ranges with a gap or an overlap, and a sweep with a missing or
+duplicated point. Files of an earlier merge into the same `OUT` that the new
+one does not write are removed. The report is saved as `OUT_merge_report.txt`.
+
+    python/.venv/bin/odspy merge out/all out/job0 out/job1 out/job2
+
 Options: `plot [--per-point]`; `crossings --column --size auto|L|N --boot`;
 `fit --x --y --range lo:hi --model power|power+c|log|line --unweighted --censored
 exclude|median --size --boot --curve`; `collapse --column --xc --nu --a --search
@@ -509,9 +532,16 @@ The suite never looks more certain than the data is:
   pairs are noted as correlated (they share a curve);
 - stationary sweeps carry the driver's checks, one line per kind naming the
   points: jackknife blocks not much longer than the autocorrelation time of |x|
-  (every error may be underestimated), x changing sign only rarely (only the
-  plain mean's error is unreliable), and chains that disagree far beyond their
-  own errors (not equilibrated).
+  (every error may be underestimated; one-chain points only, since with several
+  chains the errors are leave-one-chain-out and do not depend on the block
+  length), x changing sign only rarely (with one chain, blocks shorter than 10
+  tau(x): only the plain mean's error is unreliable; with several, chains
+  shorter than 50 tau(x) where tau(x) > 2 tau(|x|): chains started alike are
+  biased the same way, so the plain mean and N var(x) and their errors may be
+  biased; |mean|, abs_susceptibility and Binder are fine either way; tau(x) is
+  estimated within each chain, so chains that never flip at all show tau(x) ~
+  tau(|x|) and cannot be flagged: a missing note does not clear the plain mean)
+  and chains that disagree far beyond their own errors (not equilibrated).
 
 Library entry points (`import odspy`): `find_outputs`, `read_table`, `families`,
 `fit`, `fit_timeseries`, `find_crossings`, `collapse`, `search_collapse`,

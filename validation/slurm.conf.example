@@ -1,0 +1,31 @@
+# SLURM settings for `python -m validation.campaign slurm`.
+# Copy this file to validation/slurm.conf (not tracked by git) and edit it for your cluster.
+# Format: one `key = value` per line; lines starting with '#' are comments. Every key below
+# must be present (except the optional max_array_size); all but `time` may be left empty,
+# which leaves that #SBATCH line out.
+
+# Partition (queue) the array tasks run in: #SBATCH --partition=<value>.
+partition = cpu
+
+# Account (project) charged for the CPU time: #SBATCH --account=<value>.
+account = my_project
+
+# Wall-time limit of ONE array task (one job of the campaign), as SLURM accepts it
+# (minutes, HH:MM:SS or D-HH:MM:SS): #SBATCH --time=<value>. Required.
+time = 04:00:00
+
+# Memory per array task: #SBATCH --mem=<value> (e.g. 2G; empty: the partition default).
+mem = 4G
+
+# At most this many tasks of one array run at once: #SBATCH --array=1-<n>%<value>
+# (empty: no limit beyond the cluster's).
+max_concurrent = 200
+
+# Optional: at most this many jobs per array script (default 1000). SLURM rejects arrays
+# with indices at or above the cluster's MaxArraySize (`scontrol show config | grep
+# MaxArraySize`, 1001 by default); larger job lists are cut into several scripts.
+max_array_size = 1000
+
+# One shell line run in every task before its job, e.g. loading the compiler runtime that
+# bin/odsp was built with. Empty: nothing.
+setup = module load gcc

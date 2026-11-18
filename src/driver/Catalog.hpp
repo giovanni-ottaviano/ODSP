@@ -129,6 +129,7 @@ inline const std::vector<OptionDoc>& task_options() {
         {"sweep", "key=v1,v2,... | key=start:stop:step", "", "repeat the ensemble or stationary task for each value of a parameter"},
         {"sweep2", "key=v1,v2,... | key=start:stop:step", "", "with --sweep: a second parameter; runs every combination (--sweep outer), "
                                                        "e.g. --sweep dims=16x16,32x32 --sweep2 temperature=2.2:2.3:0.01"},
+        {"sweep-point", "i", "", "with --sweep: run only point i (0-based, --sweep outer, --sweep2 inner) with the seed and output files it gets in the full run (split a sweep across jobs)"},
     };
 
     return opts;

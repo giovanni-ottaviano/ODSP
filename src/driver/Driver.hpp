@@ -158,6 +158,8 @@ void execute(const Options& raw, const std::string& command) {
     if (sweep_text.empty() && !sweep2_text.empty())
         throw OptionError("--sweep2 needs --sweep: it adds a second parameter to a sweep");
     if (sweep_text.empty()) {
+        if (o.has("sweep-point"))
+            throw OptionError("--sweep-point needs --sweep: it picks one point of a sweep");
         Plan<T> p = read_plan<T>(o);
         check_unused(o);
         const ScopedPreamble preamble(p.provenance ? provenance_text(command, o, p.prefix) : std::string());
@@ -186,7 +188,7 @@ void execute(const Options& raw, const std::string& command) {
         sweeps.push_back(parse_sweep(sweep2_text, "sweep2"));
     for (std::size_t d = 0; d < sweeps.size(); ++d) {
         const std::string option = d == 0 ? "--sweep" : "--sweep2";
-        for (const char* reserved : {"seed", "task", "sweep", "sweep2", "csv", "threads", "config"})
+        for (const char* reserved : {"seed", "task", "sweep", "sweep2", "sweep-point", "csv", "threads", "config"})
             if (sweeps[d].key == reserved)
                 throw OptionError("option " + option + ": cannot sweep --" + sweeps[d].key);
         if (d == 1 && sweeps[1].key == sweeps[0].key)
@@ -212,6 +214,18 @@ void execute(const Options& raw, const std::string& command) {
         return name;
     };
 
+    // --sweep-point i: run only point i (a sweep split across jobs). All points
+    // are still validated and all seeds drawn, so point i is what the full run gives.
+    long long only = -1;
+    if (raw.has("sweep-point")) {
+        only = o.integer("sweep-point");
+        if (only < 0)
+            throw OptionError("option --sweep-point must be >= 0");
+        if (static_cast<std::size_t>(only) >= grid.size())
+            throw OptionError("option --sweep-point " + std::to_string(only) + ": the sweep has only " +
+                              std::to_string(grid.size()) + " points (0.." + std::to_string(grid.size() - 1) + ")");
+    }
+
     // Validate every point before running
     // Plans share built networks through the cache, so keeping them all costs one network, not one per point.
     std::vector<Plan<T>> plans;
@@ -228,6 +242,7 @@ void execute(const Options& raw, const std::string& command) {
                 if (!point.was_read(sweeps[d].key))
                     throw OptionError(std::string("option ") + (d == 0 ? "--sweep" : "--sweep2") + ": --" + sweeps[d].key +
                                       " does not apply to this configuration");
+            if (only >= 0) point.integer("sweep-point");   // read (and so recorded) above from `o`
             check_unused(point);
             first = point;
         }
@@ -243,7 +258,10 @@ void execute(const Options& raw, const std::string& command) {
                                      : std::to_string(sweeps[0].values.size()) + " x " +
                                            std::to_string(sweeps[1].values.size()) + " values of --" + sweeps[0].key +
                                            ", --" + sweeps[1].key)
-              << ", seed " << p0.seed << "\n\n";
+              << ", seed " << p0.seed << "\n";
+    if (only >= 0)
+        std::cout << "running only point " << only << " of " << grid.size() << " (" << point_name(grid[only]) << ")\n";
+    std::cout << "\n";
 
     save_config(first, p0.prefix);
 
@@ -254,6 +272,8 @@ void execute(const Options& raw, const std::string& command) {
     std::mt19937 seeder(p0.seed);
     seeder();   // the graph seed
     const std::size_t n = plans.size();
+    const std::size_t lo = only >= 0 ? static_cast<std::size_t>(only) : 0;   // the points that run: [lo, hi)
+    const std::size_t hi = only >= 0 ? lo + 1 : n;
     std::vector<unsigned> point_seeds(n);
     for (unsigned& sd : point_seeds) sd = seeder();
     const int budget = resolve_threads(p0.threads);
@@ -267,14 +287,14 @@ void execute(const Options& raw, const std::string& command) {
     std::vector<std::string> poorly_sampled;
     std::vector<Row> rows(n);
     std::vector<char> finished(n, 0);
-    std::size_t next_to_print = 0;
+    std::size_t next_to_print = lo;
     std::mutex print_mutex;
     auto print_ready_rows = [&]() {   // called with print_mutex held
-        for (; next_to_print < n && finished[next_to_print]; ++next_to_print) {
+        for (; next_to_print < hi && finished[next_to_print]; ++next_to_print) {
             const std::size_t i = next_to_print;
             const Plan<T>& p = plans[i];
             const Row& row = rows[i];
-            if (i == 0) {
+            if (i == lo) {
                 std::vector<std::string> header;
                 for (const SweepSpec& sw : sweeps)
                     header.push_back(sw.key);
@@ -308,16 +328,20 @@ void execute(const Options& raw, const std::string& command) {
             std::cout << std::endl;
             if (p.task == "stationary") {   // same check as a single stationary run
                 double tau = 0.0;   // tau(|x|) governs the printed columns (see task_stationary)
-                for (const auto& c : row)
+                double chains = 1.0;   // several: leave-one-chain-out errors, no block-length issue
+                for (const auto& c : row) {
                     if (c.first == "tau_abs")
                         tau = c.second;
-                if (static_cast<double>(p.params.samples) / p.params.blocks < 10.0 * tau)
+                    else if (c.first == "chains")
+                        chains = c.second;
+                }
+                if (chains <= 1.0 && static_cast<double>(p.params.samples) / p.params.blocks < 10.0 * tau)
                     poorly_sampled.push_back(point_name(grid[i]));
             }
         }
     };
-    parallel_for(static_cast<int>(n), budget, [&](int idx) {
-        const std::size_t i = static_cast<std::size_t>(idx);
+    parallel_for(static_cast<int>(hi - lo), budget, [&](int idx) {
+        const std::size_t i = lo + static_cast<std::size_t>(idx);
         const Plan<T>& p = plans[i];
         const std::string point_prefix = p.prefix.empty() ? std::string() : p.prefix + "_point" + std::to_string(i);
         Row row = p.task == "ensemble" ? task_ensemble<T>(p.params, p.setup, point_seeds[i], budget, point_prefix, false)

@@ -179,6 +179,45 @@ TEST_CASE(setup_builds_every_model_type) {
     CHECK(m->get_graph().is_complete());
 }
 
+TEST_CASE(setup_reads_the_hk_update_mode) {
+    auto mode = [](std::vector<std::string> extra) {
+        std::vector<std::string> args = {"--model", "hk", "--epsilon", "0.2", "--graph", "complete", "--n", "30"};
+        args.insert(args.end(), extra.begin(), extra.end());
+        Options o = parse(args);
+        Setup<double> s = read_setup<double>(o, 1);
+        std::mt19937 rng(1);
+        auto m = s.factory(rng);
+        return dynamic_cast<HegselmannKrauseModel<double>*>(m.get())->update();
+    };
+    CHECK(mode({}) == HKUpdate::Synchronous);
+    CHECK(mode({"--update", "sweep"}) == HKUpdate::Sweep);
+    CHECK(mode({"--update", "random"}) == HKUpdate::Random);
+    CHECK(mode({"--update", "synchronous"}) == HKUpdate::Synchronous);
+    CHECK(mode({"--update", "ordered"}) == HKUpdate::Ordered);
+    CHECK_THROWS_AS(mode({"--update", "ordered", "--synchronous", "false"}), OptionError);
+    // --synchronous true|false stays an alias of --update synchronous|random
+    CHECK(mode({"--synchronous", "false"}) == HKUpdate::Random);
+    CHECK(mode({"--synchronous", "true"}) == HKUpdate::Synchronous);
+    CHECK(mode({"--update", "random", "--synchronous", "false"}) == HKUpdate::Random);
+    CHECK_THROWS_AS(mode({"--update", "sweep", "--synchronous", "false"}), OptionError);
+    CHECK_THROWS_AS(mode({"--update", "random", "--synchronous", "true"}), OptionError);
+    CHECK_THROWS_AS(mode({"--update", "fixed"}), OptionError);
+
+    // The alias and the new option give the same trajectory.
+    auto states = [](std::vector<std::string> extra) {
+        std::vector<std::string> args = {"--model", "hk", "--epsilon", "0.2", "--graph", "complete", "--n", "60"};
+        args.insert(args.end(), extra.begin(), extra.end());
+        Options o = parse(args);
+        Setup<double> s = read_setup<double>(o, 5);
+        std::mt19937 rng(9);
+        auto m = s.factory(rng);
+        m->advance(3, true, false);
+        return m->get_graph().states();
+    };
+    CHECK(states({"--synchronous", "false"}) == states({"--update", "random"}));
+    CHECK(states({}) == states({"--update", "synchronous"}));
+}
+
 TEST_CASE(setup_builds_every_graph_type) {
     struct Case { std::vector<std::string> args; std::size_t nodes; };
     const std::vector<Case> cases = {

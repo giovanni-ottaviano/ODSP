@@ -28,6 +28,23 @@ inline std::vector<int> create_random_lattice(std::size_t length,
     return lattice;
 }
 
+// Independent +1 / -1 spins, each +1 with probability up_probability: the
+// infinite-temperature start, whose number of +1 is binomial (create_random_lattice
+// fixes it at floor(up_fraction * length)).
+inline std::vector<int> create_bernoulli_spins(std::size_t length,
+                                               double up_probability,
+                                               std::mt19937& rng) {
+    if (!(up_probability >= 0.0 && up_probability <= 1.0))
+        throw std::invalid_argument(
+            "create_bernoulli_spins: up_probability must be in [0, 1].");
+
+    std::bernoulli_distribution up(up_probability);
+    std::vector<int> spins(length);
+    for (std::size_t i = 0; i < length; ++i)
+        spins[i] = up(rng) ? 1 : -1;
+    return spins;
+}
+
 // Opinions 0..q-1 in prescribed proportions: fractions[k] of the nodes hold
 // opinion k (fractions must be >= 0 and sum to 1 within 1e-9). Counts are
 // floor(fraction * length), and the few nodes left over go to the opinions with

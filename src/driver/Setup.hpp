@@ -256,6 +256,7 @@ struct ModelSpec {
     double epsilon = 0.0, mu = 0.5, tolerance = 1e-6;
     int q = 2, opinions = 2;
     bool repetition = true, synchronous = true;
+    std::string hk_update = "synchronous";   // hk: synchronous | random | sweep | ordered
 
     std::string description;
 };
@@ -314,8 +315,28 @@ inline ModelSpec read_model(Options& o) {
         d << " epsilon=" << s.epsilon << " mu=" << s.mu;
     }
     else if (s.name == "hk") {
-        s.epsilon = o.num("epsilon"); s.synchronous = o.flag("synchronous", true); s.tolerance = o.num("tolerance", 1e-9);
-        d << " epsilon=" << s.epsilon << (s.synchronous ? " (synchronous)" : " (asynchronous)");
+        s.epsilon = o.num("epsilon"); s.tolerance = o.num("tolerance", 1e-9);
+        // --update synchronous|random|sweep|ordered; --synchronous true|false is the older spelling
+        // of synchronous|random and may be given with --update only if it agrees.
+        const std::vector<std::string> modes = {"synchronous", "random", "sweep", "ordered"};
+        if (o.has("update")) {
+            s.hk_update = o.choice("update", "synchronous", modes);
+            if (o.has("synchronous") &&
+                (s.hk_update == "sweep" || s.hk_update == "ordered" ||
+                 o.flag("synchronous", true) != (s.hk_update == "synchronous")))
+                throw OptionError("option --synchronous " + o.str("synchronous") + " contradicts --update " +
+                                  s.hk_update + " (--synchronous true|false means --update synchronous|random)");
+        } else if (o.has("synchronous")) {
+            s.hk_update = o.flag("synchronous", true) ? "synchronous" : "random";
+        } else {
+            s.hk_update = o.choice("update", "synchronous", modes);
+        }
+        s.synchronous = s.hk_update == "synchronous";
+        d << " epsilon=" << s.epsilon
+          << (s.hk_update == "synchronous" ? " (synchronous)"
+              : s.hk_update == "random"    ? " (asynchronous)"
+              : s.hk_update == "sweep"     ? " (random-order sweeps)"
+                                           : " (index-order sweeps)");
     }
     s.description = d.str();
 
@@ -328,7 +349,10 @@ std::unique_ptr<Model<T>> make_model(const ModelSpec& s, std::unique_ptr<BaseGra
         if (s.name == "deffuant")
             return std::make_unique<DeffuantModel<T>>(std::move(g), rng, s.epsilon, s.mu, s.tolerance);
 
-        return std::make_unique<HegselmannKrauseModel<T>>(std::move(g), rng, s.epsilon, s.synchronous, s.tolerance);
+        const HKUpdate u = s.hk_update == "sweep"   ? HKUpdate::Sweep
+                         : s.hk_update == "ordered" ? HKUpdate::Ordered
+                         : s.hk_update == "random"  ? HKUpdate::Random : HKUpdate::Synchronous;
+        return std::make_unique<HegselmannKrauseModel<T>>(std::move(g), rng, s.epsilon, u, s.tolerance);
     }
     else {
         if (s.name == "voter") {
@@ -557,7 +581,7 @@ inline InitSpec read_init(Options& o, const ModelSpec& m) {
     std::string fallback = continuous ? "uniform" : "random";
     if (m.name == "potts" || (m.name == "noisy-voter" && m.opinions > 2))
         fallback = "balanced";
-    s.kind = o.choice("init", fallback, {"random", "all", "up", "down", "balanced", "fractions", "distinct", "uniform", "file"});
+    s.kind = o.choice("init", fallback, {"random", "bernoulli", "all", "up", "down", "balanced", "fractions", "distinct", "uniform", "file"});
     std::ostringstream d;
     const std::string requested = s.kind;
     if (s.kind == "up")   { s.kind = "all"; s.value = 1.0; }
@@ -566,6 +590,12 @@ inline InitSpec read_init(Options& o, const ModelSpec& m) {
     if (s.kind == "random") {
         s.up = o.num("up", 0.5);
         d << "random +/-1, up fraction " << s.up;
+    }
+    else if (s.kind == "bernoulli") {
+        s.up = o.num("up", 0.5);
+        if (!(s.up >= 0.0 && s.up <= 1.0))
+            throw OptionError("option --up: a probability in [0, 1] is needed with --init bernoulli");
+        d << "independent +/-1, P(+1) = " << s.up;
     }
     else if (s.kind == "all") {
         if (requested == "all")
@@ -629,7 +659,7 @@ inline InitSpec read_init(Options& o, const ModelSpec& m) {
             throw OptionError("model " + m.name + " is defined for opinions " + allowed.describe() +
                               ", but --init distinct gives every node its own label");
         std::vector<double> produced;
-        if (s.kind == "random")    produced = {1.0, -1.0};
+        if (s.kind == "random" || s.kind == "bernoulli") produced = {1.0, -1.0};
         if (s.kind == "all")       produced = {s.value};
         if (s.kind == "balanced")  for (int k = 0; k < s.opinions; ++k) produced.push_back(k);
         if (s.kind == "fractions") for (std::size_t k = 0; k < s.fractions.size(); ++k) produced.push_back(static_cast<double>(k));
@@ -679,6 +709,7 @@ template <typename T>
 std::vector<T> make_states(const InitSpec& s, std::size_t n, std::mt19937& rng) {
     auto convert = [](const std::vector<int>& v) { return std::vector<T>(v.begin(), v.end()); };
     if (s.kind == "random")    return convert(create_random_lattice(n, s.up, rng));
+    if (s.kind == "bernoulli") return convert(create_bernoulli_spins(n, s.up, rng));
     if (s.kind == "all")       return std::vector<T>(n, static_cast<T>(s.value));
     if (s.kind == "balanced")  return convert(create_balanced_opinions(n, s.opinions, rng));
     if (s.kind == "fractions") return convert(create_opinions_with_fractions(n, s.fractions, rng));
@@ -931,7 +962,7 @@ struct Setup {
 // The opinions a start can produce (empty when unbounded: distinct, uniform).
 inline std::vector<double> init_values(const InitSpec& init) {
     std::vector<double> v;
-    if (init.kind == "random")
+    if (init.kind == "random" || init.kind == "bernoulli")
         v = {1.0, -1.0};
     if (init.kind == "all")
         v = {init.value};

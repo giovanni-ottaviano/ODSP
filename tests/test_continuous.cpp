@@ -257,3 +257,213 @@ TEST_CASE(hk_asynchronous_and_sparse_graphs_converge) {
     sync.advance(25, /*use_mc_steps=*/false, false);
     CHECK(sync.rounds() == 2);
 }
+
+// ------------------------------------------------ HK update modes (fix round R20)
+
+TEST_CASE(hk_existing_update_modes_unchanged) {
+    // Golden values recorded with the code before the random-order sweep mode was added: the
+    // synchronous and random-with-replacement modes must give the same trajectories, through
+    // the bool constructor and through HKUpdate.
+    for (int api = 0; api < 2; ++api)
+        for (int mode = 0; mode < 2; ++mode) {
+            const HKUpdate u = mode == 0 ? HKUpdate::Synchronous : HKUpdate::Random;
+            std::mt19937 rng(21 + mode);
+            auto g = complete_uniform(200, rng);
+            std::unique_ptr<HegselmannKrauseModel<>> m =
+                api == 0 ? std::make_unique<HegselmannKrauseModel<>>(std::move(g), &rng, 0.15, mode == 0)
+                         : std::make_unique<HegselmannKrauseModel<>>(std::move(g), &rng, 0.15, u);
+            CHECK(m->update() == u && m->synchronous() == (mode == 0));
+            m->advance(mode == 0 ? 5 : 3, true, false);
+            const auto& x = m->get_graph().states();
+            CHECK_NEAR(x[0], mode == 0 ? 0.75385546431205686 : 0.79577427969661874, 1e-13);
+            CHECK_NEAR(x[57], mode == 0 ? 0.31227517749784495 : 0.82176843597863869, 1e-13);
+            CHECK_NEAR(sum_of(x), mode == 0 ? 100.92329283839362 : 101.85777086473013, 1e-11);
+
+            std::mt19937 rng2(31 + mode);
+            auto lat = std::make_unique<RegularLattice<double>>(create_uniform_opinions(100, rng2), std::vector<int>{10, 10});
+            std::unique_ptr<HegselmannKrauseModel<>> l =
+                api == 0 ? std::make_unique<HegselmannKrauseModel<>>(std::move(lat), &rng2, 0.3, mode == 0)
+                         : std::make_unique<HegselmannKrauseModel<>>(std::move(lat), &rng2, 0.3, u);
+            l->advance(4, true, false);
+            const auto& y = l->get_graph().states();
+            CHECK_NEAR(y[0], mode == 0 ? 0.35129543564337529 : 0.20101225810197995, 1e-13);
+            CHECK_NEAR(y[57], mode == 0 ? 0.55722869949364118 : 0.15659462249014081, 1e-13);
+            CHECK_NEAR(sum_of(y), mode == 0 ? 49.619145311264511 : 52.483885254337373, 1e-11);
+        }
+}
+
+TEST_CASE(hk_sweep_mode_updates_every_agent_once_per_sweep) {
+    // With distinct opinions every update moves the agent, so the number of opinion changes
+    // counts the updates and persistence tells which agents were updated.
+    std::mt19937 rng(41);
+    HegselmannKrauseModel<> m(complete_uniform(40, rng), &rng, 0.3, HKUpdate::Sweep);
+    CHECK(m.update() == HKUpdate::Sweep && !m.synchronous());
+    m.advance(20, /*use_mc_steps=*/false, false);              // half a sweep: 20 distinct agents
+    CHECK(m.get_changes() == 20);
+    CHECK_NEAR(m.persistence(), 0.5, 1e-12);
+    m.advance(20, false, false);                               // the other 20: the sweep is complete
+    CHECK(m.get_changes() == 40);
+    CHECK_NEAR(m.persistence(), 0.0, 1e-12);
+    m.reset_persistence();
+    m.advance(1, true, false);                                 // a new order: again each agent once
+    CHECK(m.get_changes() == 80);
+    CHECK_NEAR(m.persistence(), 0.0, 1e-12);
+    CHECK(m.rounds() == 0);
+
+    // Sparse graph too (eps = 1: every neighbour is a confidant, so every update moves the agent).
+    HegselmannKrauseModel<> lat(std::make_unique<RegularLattice<double>>(create_uniform_opinions(100, rng),
+                                                                         std::vector<int>{10, 10}), &rng, 1.0, HKUpdate::Sweep);
+    lat.advance(1, true, false);
+    CHECK(lat.get_changes() == 100);
+    CHECK_NEAR(lat.persistence(), 0.0, 1e-12);
+
+    // Random with replacement leaves agents out of a sweep (about e^-1 of them).
+    HegselmannKrauseModel<> rnd(complete_uniform(400, rng), &rng, 0.3, HKUpdate::Random);
+    rnd.advance(1, true, false);
+    CHECK(rnd.persistence() > 0.25 && rnd.persistence() < 0.5);
+}
+
+TEST_CASE(hk_sweep_mode_is_reproducible) {
+    std::mt19937 init(42);
+    const std::vector<double> x0 = create_uniform_opinions(300, init);
+    auto run = [&x0](unsigned seed) {
+        std::mt19937 rng(seed);
+        HegselmannKrauseModel<> m(std::make_unique<CompleteGraph<double>>(x0), &rng, 0.12, HKUpdate::Sweep);
+        m.advance(10, true, false);
+        return m.get_graph().states();
+    };
+    CHECK(run(7) == run(7));
+    CHECK(run(7) != run(8));                                  // the order is random
+}
+
+TEST_CASE(hk_sweep_mode_converges_exactly) {
+    std::mt19937 rng(43);
+    for (double eps : {0.1, 0.25}) {
+        HegselmannKrauseModel<> m(complete_uniform(300, rng), &rng, eps, HKUpdate::Sweep);
+        m.advance(1000000);
+        CHECK(m.get_mc_steps() < 1000000 && m.is_absorbing_state());
+        CHECK(frozen_state(m.get_graph(), eps, m.tolerance(), /*strict=*/false));
+        const std::vector<double> before = m.get_graph().states();
+        m.advance(5, true, false);                           // nothing moves by more than the tolerance
+        for (std::size_t i = 0; i < before.size(); ++i)
+            CHECK(std::fabs(m.get_graph().get_state(i) - before[i]) <= m.tolerance());
+        // the mean is not conserved by sequential averaging, but opinions stay in the range
+        for (double v : m.get_graph().states()) CHECK(v >= 0.0 && v <= 1.0);
+    }
+    HegselmannKrauseModel<> lat(std::make_unique<RegularLattice<double>>(create_uniform_opinions(400, rng),
+                                                                         std::vector<int>{20, 20}), &rng, 0.2, HKUpdate::Sweep);
+    lat.advance(1000000);
+    CHECK(lat.get_mc_steps() < 1000000);
+    CHECK(frozen_state(lat.get_graph(), 0.2, lat.tolerance(), false));
+}
+
+TEST_CASE(hk_sweep_mode_fast_complete_path_matches_general_path) {
+    // Same seed -> same random orders; the complete graph's sorted-block mean must give the
+    // trajectory of the general neighbour loop (up to rounding).
+    std::mt19937 init(44);
+    const std::vector<double> x0 = create_uniform_opinions(300, init);
+    std::mt19937 rng_a(45), rng_b(45);
+    HegselmannKrauseModel<> fast(std::make_unique<CompleteGraph<double>>(x0), &rng_a, 0.1, HKUpdate::Sweep);
+    HegselmannKrauseModel<> slow(std::make_unique<AdjacencyGraph<double>>(x0, complete_edges(300)), &rng_b, 0.1,
+                                 HKUpdate::Sweep);
+    for (int sweep = 0; sweep < 25; ++sweep) {
+        fast.advance(1, true, false);
+        slow.advance(1, true, false);
+        for (std::size_t i = 0; i < 300; ++i)
+            CHECK_NEAR(fast.get_graph().get_state(i), slow.get_graph().get_state(i), 1e-9);
+    }
+    fast.advance(37, false, false);                            // partial sweeps continue the order
+    slow.advance(37, false, false);
+    for (std::size_t i = 0; i < 300; ++i) CHECK_NEAR(fast.get_graph().get_state(i), slow.get_graph().get_state(i), 1e-9);
+}
+
+// ------------------------------------------------ HK ordered sweeps (fix round R23)
+
+namespace {
+// The order in which a sequential HK model updates its agents over `updates` single updates:
+// with distinct opinions every update moves the agent, so the one that changed is the one
+// updated.
+std::vector<std::size_t> update_order(HegselmannKrauseModel<>& m, long long updates) {
+    std::vector<std::size_t> order;
+    for (long long k = 0; k < updates; ++k) {
+        const std::vector<double> before = m.get_graph().states();
+        m.advance(1, /*use_mc_steps=*/false, false);
+        for (std::size_t i = 0; i < before.size(); ++i)
+            if (m.get_graph().get_state(i) != before[i]) order.push_back(i);
+    }
+    return order;
+}
+}  // namespace
+
+TEST_CASE(hk_ordered_mode_visits_agents_in_index_order) {
+    std::mt19937 rng(51);
+    const std::size_t n = 30;
+    HegselmannKrauseModel<> m(complete_uniform(n, rng), &rng, 0.3, HKUpdate::Ordered);
+    CHECK(m.update() == HKUpdate::Ordered && !m.synchronous());
+    std::vector<std::size_t> expected(n);
+    std::iota(expected.begin(), expected.end(), std::size_t{0});
+    const auto first = update_order(m, static_cast<long long>(n));
+    const auto second = update_order(m, static_cast<long long>(n));
+    CHECK(first == expected);
+    CHECK(second == expected);
+    CHECK(m.rounds() == 0);
+}
+
+TEST_CASE(hk_ordered_mode_uses_current_opinions) {
+    // Brute force: agents 0..N-1 in turn move to the mean of the CURRENT opinions within eps of
+    // their own (themselves included), for three sweeps.
+    std::mt19937 init(52);
+    std::vector<double> x = create_uniform_opinions(60, init);
+    std::mt19937 rng(53);
+    HegselmannKrauseModel<> m(std::make_unique<CompleteGraph<double>>(x), &rng, 0.15, HKUpdate::Ordered);
+    m.advance(3, true, false);
+    for (int sweep = 0; sweep < 3; ++sweep)
+        for (std::size_t i = 0; i < x.size(); ++i) {
+            double sum = 0.0;
+            int count = 0;
+            for (double y : x)
+                if (std::fabs(y - x[i]) <= 0.15) { sum += y; ++count; }
+            x[i] = sum / count;
+        }
+    for (std::size_t i = 0; i < x.size(); ++i) CHECK_NEAR(m.get_graph().get_state(i), x[i], 1e-12);
+}
+
+TEST_CASE(hk_ordered_mode_is_deterministic_and_matches_general_path) {
+    std::mt19937 init(54);
+    const std::vector<double> x0 = create_uniform_opinions(300, init);
+    auto run = [&x0](unsigned seed, bool complete) {
+        std::mt19937 rng(seed);
+        std::unique_ptr<BaseGraph<double>> g;
+        if (complete) g = std::make_unique<CompleteGraph<double>>(x0);
+        else          g = std::make_unique<AdjacencyGraph<double>>(x0, complete_edges(300));
+        HegselmannKrauseModel<> m(std::move(g), &rng, 0.12, HKUpdate::Ordered);
+        m.advance(10, true, false);
+        m.advance(37, false, false);                         // a partial sweep continues the order
+        return m.get_graph().states();
+    };
+    CHECK(run(7, true) == run(8, true));                    // no randomness after the start
+    const auto a = run(7, true), b = run(7, false);
+    for (std::size_t i = 0; i < a.size(); ++i) CHECK_NEAR(a[i], b[i], 1e-9);
+}
+
+TEST_CASE(hk_sweep_mode_reshuffles_every_sweep) {
+    std::mt19937 rng(55);
+    const std::size_t n = 30;
+    HegselmannKrauseModel<> m(complete_uniform(n, rng), &rng, 0.3, HKUpdate::Sweep);
+    const auto first = update_order(m, static_cast<long long>(n));
+    const auto second = update_order(m, static_cast<long long>(n));
+    auto sorted = [](std::vector<std::size_t> v) { std::sort(v.begin(), v.end()); return v; };
+    std::vector<std::size_t> all(n);
+    std::iota(all.begin(), all.end(), std::size_t{0});
+    CHECK(sorted(first) == all && sorted(second) == all);   // each a permutation
+    CHECK(first != second);                                  // a fresh order each sweep
+    CHECK(first != all);
+}
+
+TEST_CASE(hk_ordered_mode_converges_exactly) {
+    std::mt19937 rng(56);
+    HegselmannKrauseModel<> m(complete_uniform(300, rng), &rng, 0.2, HKUpdate::Ordered);
+    m.advance(1000000);
+    CHECK(m.get_mc_steps() < 1000000 && m.is_absorbing_state());
+    CHECK(frozen_state(m.get_graph(), 0.2, m.tolerance(), /*strict=*/false));
+}

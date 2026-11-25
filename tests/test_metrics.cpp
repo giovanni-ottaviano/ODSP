@@ -254,6 +254,63 @@ TEST_CASE(metric_continuous_ensemble_writes_clusters) {
     for (const char* s : {"_clusters.csv", "_replicas.csv", "_config.txt"}) fs::remove(prefix + s, ec);
 }
 
+// largest_cluster: the share of the nodes in the largest opinion cluster, with the cluster
+// definition of `clusters` and of prefix_clusters.csv (consecutive sorted opinions closer than
+// 1e-3). The validation campaign uses it to tell one major cluster from complete consensus.
+TEST_CASE(metric_largest_cluster_is_the_largest_clusters_share) {
+    // Unit level: gaps of 5e-4 and 4e-4 join {0, 0.0005, 0.0009} into the unique largest
+    // cluster (3/5) only because the cluster gap is 1e-3; {0.5} and {0.9} stay apart.
+    std::mt19937 rng(1);
+    std::vector<double> x = {0.9, 0.0009, 0.0, 0.5, 0.0005};
+    HegselmannKrauseModel<double> hk(std::make_unique<CompleteGraph<double>>(x), &rng, 0.1);
+    ModelSpec spec;
+    spec.name = "hk";
+    CHECK_NEAR(make_observable<double>("largest_cluster", spec)(hk), 0.6, 1e-12);
+    CHECK_NEAR(make_observable<double>("clusters", spec)(hk), 3.0, 1e-12);   // each holds >= 1%
+
+    // Driver level: per replica, largest_cluster = (largest size in prefix_clusters.csv) / N, and
+    // clusters = number of rows with size >= 1% of N; eps = 0.6 > 1/2 always ends in one cluster.
+    for (const char* eps : {"0.1", "0.6"}) {
+        const std::string prefix = temp_prefix();
+        const int n = 300;
+        CHECK(run_quiet({"--model", "deffuant", "--epsilon", eps, "--graph", "complete", "--n", std::to_string(n),
+                         "--task", "ensemble", "--replicas", "6", "--seed", "21", "--observables",
+                         "clusters,largest_cluster", "--csv", prefix}) == 0);
+        std::vector<double> largest(6, 0.0), major(6, 0.0), share(6, -1.0), counted(6, -1.0);
+        std::istringstream cl(read_without_comments(prefix + "_clusters.csv"));
+        std::string line;
+        std::getline(cl, line);                                   // replica,position,size,min,max
+        while (std::getline(cl, line)) {
+            std::vector<std::string> f;
+            std::istringstream ls(line);
+            for (std::string cell; std::getline(ls, cell, ',');) f.push_back(cell);
+            const auto r = static_cast<std::size_t>(std::stoi(f[0]));
+            const double size = std::stod(f[2]);
+            largest[r] = std::max(largest[r], size / n);
+            if (size >= 0.01 * n) major[r] += 1.0;
+        }
+        std::istringstream rep(read_without_comments(prefix + "_replicas.csv"));
+        std::getline(rep, line);
+        CHECK(line == "replica,reached_consensus,absorbed,stop_time,clusters,largest_cluster");
+        while (std::getline(rep, line)) {
+            std::vector<std::string> f;
+            std::istringstream ls(line);
+            for (std::string cell; std::getline(ls, cell, ',');) f.push_back(cell);
+            const auto r = static_cast<std::size_t>(std::stoi(f[0]));
+            counted[r] = std::stod(f[4]);
+            share[r] = std::stod(f[5]);
+        }
+        for (std::size_t r = 0; r < 6; ++r) {
+            CHECK_NEAR(share[r], largest[r], 1e-12);
+            CHECK_NEAR(counted[r], major[r], 1e-12);
+            if (std::string(eps) == "0.6") CHECK_NEAR(share[r], 1.0, 1e-12);
+            else CHECK(share[r] < 1.0);                           // eps = 0.1: several clusters
+        }
+        std::error_code ec;
+        for (const char* s : {"_clusters.csv", "_replicas.csv", "_config.txt"}) fs::remove(prefix + s, ec);
+    }
+}
+
 // ------------------------------------------------- observable availability
 
 TEST_CASE(metric_observables_are_available_where_meaningful) {

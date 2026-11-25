@@ -37,7 +37,7 @@ include/                    the library (header-only)
   Ensemble.hpp                many independent replicas (multi-threaded) -> ensemble statistics
   Parallel.hpp                parallel loops on a shared thread pool; nested loops borrow idle threads
   Statistics.hpp              jackknife errors, integrated autocorrelation time
-  Utils.hpp                   initial conditions: random +/-1, q opinions in given shares, distinct
+  Utils.hpp                   initial conditions: random +/-1 (exact or Bernoulli), q opinions in given shares, distinct
                               opinions, uniform continuous opinions
   Cli.hpp, CsvWriter.hpp      command line and CSV output for the demos
 src/odsp.cpp, src/driver/    the command-line driver (bin/odsp)
@@ -107,6 +107,10 @@ odsp --model deffuant --epsilon 0.2 --graph complete --n 1000 --task ensemble --
   Potts, energy and specific heat N·var(e)/T²). `ensemble --threshold x` also
   records when the largest opinion share first reaches x; continuous-opinion
   ensembles write every replica's final clusters to `prefix_clusters.csv`.
+  Their observables `clusters` (clusters holding at least 1% of the nodes) and
+  `largest_cluster` (the share of the nodes in the largest cluster: 1 at
+  complete consensus) use the same clusters: sorted opinions split wherever
+  two consecutive values differ by more than 1e-3.
 - **Time series**: `--log-times [k]` (k points per decade, default 10) or
   `--every n` sets when `run` records. Given to `ensemble`, it also writes
   `prefix_timeseries.csv`: at each time, every observable's mean over all
@@ -132,6 +136,11 @@ odsp --model deffuant --epsilon 0.2 --graph complete --n 1000 --task ensemble --
   `complete`, `gnp`, `gnm`, `regular`, `ws`, `ba`, `star`, `file`), initial
   condition, zealots, observables. `odsp --help models | graphs | tasks | init |
   observables` lists them all with defaults.
+- **Random ±1 starts**: `--init random --up f` places exactly floor(f N)
+  nodes at +1 at random (fixed magnetisation); `--init bernoulli --up p` makes
+  every node +1 independently with probability p (the infinite-temperature
+  start of a quench, binomial magnetisation). Both work for every ±1 model and
+  graph and are reproducible from the seed.
 - **Empirical starts**: `--init file --init-path opinions.txt` reads one
   `node opinion` pair per line (separators and `#` comments as in edge-list
   files). With `--graph file` the node is its label in the edge list, so the
@@ -258,14 +267,22 @@ connected component. Generators are reproducible from the RNG seed;
 | `PottsModel` | q-state Potts model at temperature T, H = −J Σ δ(sᵢ,sⱼ), states 0..q−1 | `PottsDynamics::HeatBath` or `Metropolis`; exact T_c = 1/ln(1+√q) on the square lattice, continuous for q ≤ 4, first order above; `order_parameter()`, `energy()` |
 
 **Continuous opinions** (`T = double`): `DeffuantModel<>(graph, &rng, epsilon, mu = 0.5)` and
-`HegselmannKrauseModel<>(graph, &rng, epsilon, synchronous = true)`. Agents only
+`HegselmannKrauseModel<>(graph, &rng, epsilon, update)` with `update` one of
+`HKUpdate::Synchronous` (the default, also `synchronous = true`), `HKUpdate::Random`
+(one random agent at a time, `synchronous = false`), `HKUpdate::Sweep` (every agent
+once per sweep, in a new random order each sweep) or `HKUpdate::Ordered` (every agent once
+per sweep, in index order: a fixed order; driver: `--update
+synchronous|random|sweep|ordered`, with `--synchronous true|false` kept as the older
+spelling of the first two). The scheme matters: on the complete graph the probability of
+consensus differs between them. Agents only
 interact with opinions within ε of their own. Such dynamics never reach exact
 consensus, so with a `tolerance`: consensus = all opinions within it;
 converged = every pair of neighbours that can still interact agrees within it
 (consensus, or a frozen set of separated clusters) -- `advance()` stops there.
 Analyse final states with `model.clusters()` / `count_clusters(states, gap,
 min_fraction)`. On complete graphs Hegselmann-Krause rounds and the
-convergence test cost O(N log N) (sorted opinions), not O(N²).
+convergence test cost O(N log N) (sorted opinions), not O(N²); its sequential
+modes (random, sweep, ordered) cost O(N) per update, O(N²) per sweep.
 
 **Number of opinions.** Opinions are values of the template type `T`. The
 voter models (`VoterModel`, `RejectionFreeVoterModel`), `MajorityModel`

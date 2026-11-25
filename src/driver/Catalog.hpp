@@ -60,7 +60,11 @@ inline const std::vector<Entry>& model_catalog() {
           {"tolerance", "x", "1e-06", "consensus / convergence tolerance"}}},
         {"hk", "Hegselmann-Krause bounded confidence (continuous opinions)",
          {{"epsilon", "x", "required", "confidence bound"},
-          {"synchronous", "true|false", "true", "all agents update together (one round per sweep)"},
+          {"update", "synchronous|random|sweep|ordered", "synchronous",
+           "synchronous: all agents together (one round per sweep); random: one random agent at a time; "
+           "sweep: every agent once per sweep, in a new random order each sweep; ordered: every agent "
+           "once per sweep, in index order (a fixed order)"},
+          {"synchronous", "true|false", "true", "older spelling of --update synchronous|random"},
           {"tolerance", "x", "1e-09", "consensus / convergence tolerance"}}},
     };
 
@@ -137,8 +141,9 @@ inline const std::vector<OptionDoc>& task_options() {
 
 inline const std::vector<OptionDoc>& init_options() {
     static const std::vector<OptionDoc> opts = {
-        {"init", "random|all|up|down|balanced|fractions|distinct|uniform|file", "model-dependent", "initial opinions"},
-        {"up", "f", "0.5", "random: fraction of +1 (the rest -1)"},
+        {"init", "random|bernoulli|all|up|down|balanced|fractions|distinct|uniform|file", "model-dependent", "initial opinions"},
+        {"up", "f", "0.5", "random: fraction of +1, exactly floor(f N) nodes (the rest -1); bernoulli: each node +1 "
+                             "with probability f, independently (infinite-temperature start)"},
         {"value", "x", "1", "all: the opinion every node starts with (up = +1, down = -1)"},
         {"opinions", "q", "model-dependent", "balanced: opinions 0..q-1 in equal shares"},
         {"fractions", "f0,f1,...", "", "fractions: share of each opinion 0, 1, ... (required with --init fractions)"},

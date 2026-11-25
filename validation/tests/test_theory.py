@@ -179,6 +179,18 @@ def test_potts_constants():
     assert theory.POTTS3_EXPONENTS == approx({"nu": 5 / 6, "gamma/nu": 26 / 15, "beta/nu": 2 / 15})
 
 
+def test_majority_vote_constants():
+    # Yu, Phys. Rev. E 95, 012101 (2017): q_c = 0.07518(3) on the periodic square lattice for
+    # Oliveira's rule as ODSP implements it (validation/models/majorityvote.py)
+    assert theory.MV_QC == (0.07518, 3e-5)
+    for key in ("mv_qc", "mv_exponents", "mv_binder"):
+        assert key in CITATIONS
+    assert "0.07518(3)" in CITATIONS["mv_qc"] and "012101" in CITATIONS["mv_qc"]
+    assert "J. Stat. Phys. 66, 273" in CITATIONS["mv_qc"]           # Oliveira 1992, 0.075(1)
+    assert "J. Stat. Phys. 66, 273" in CITATIONS["mv_exponents"]    # Ising class
+    assert "Salas" in CITATIONS["mv_binder"] and "J. Stat. Phys. 66, 273" in CITATIONS["mv_binder"]
+
+
 def _referenced_citation_keys(path: Path) -> set[str]:
     """String keys a model module cites: `source="key"` keywords and `CITATIONS["key"]`."""
     keys: set[str] = set()

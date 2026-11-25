@@ -125,6 +125,120 @@ CITATIONS: dict[str, str] = {
         "q-state Potts model\", J. Phys. A 13, L189 (1980) (magnetic exponent: beta/nu = 2/15, "
         "gamma/nu = 2 - 2 beta/nu = 26/15 for q = 3); F. Y. Wu, \"The Potts model\", "
         "Rev. Mod. Phys. 54, 235 (1982) (q = 3: alpha = 1/3, beta = 1/9, gamma = 13/9, nu = 5/6)"),
+    "mv_qc": (
+        "U. Yu, \"Phase transition in the majority-vote model on the Archimedean lattices\", "
+        "Phys. Rev. E 95, 012101 (2017), Table I and text: q_c = 0.07518(3) on the periodic "
+        "square lattice from the Binder crossings of L <= 260 (value and uncertainty used), for "
+        "the flip probability w = (1/2)[1 - (1 - 2q) s_i sgn(sum of the 4 nearest neighbours)] "
+        "(sgn(0) = 0: a tie gives either opinion with probability 1/2), each site updated once "
+        "per Monte Carlo step on average; earlier: M. J. de Oliveira, \"Isotropic majority-vote "
+        "model on a square lattice\", J. Stat. Phys. 66, 273 (1992) (the model; q_c = "
+        "0.075(1)); W. Kwak, J.-S. Yang, J.-I. Sohn and I.-M. Kim, Phys. Rev. E 75, 061110 "
+        "(2007) (q_c = 0.075(1))"),
+    "mv_exponents": (
+        "the 2D Ising exponents (ising_exponents: nu = 1, gamma/nu = 7/4, beta/nu = 1/8) by "
+        "universality: G. Grinstein, C. Jayaprakash and Y. He, \"Statistical mechanics of "
+        "probabilistic cellular automata\", Phys. Rev. Lett. 55, 2527 (1985) (non-equilibrium "
+        "up-down symmetric spin models are in the equilibrium Ising class); M. J. de Oliveira, "
+        "J. Stat. Phys. 66, 273 (1992) (the square-lattice majority-vote model is in the 2D "
+        "Ising class); U. Yu, Phys. Rev. E 95, 012101 (2017) (1/nu = 0.99(3), "
+        "gamma/nu = 1.75(1), beta/nu = 0.123(3) at q_c = 0.07518(3))"),
+    "mv_binder": (
+        "U* of the 2D Ising class on the periodic square L x L lattice, J. Salas and A. D. Sokal, "
+        "J. Stat. Phys. 98, 551 (2000) (ising_binder: value and uncertainty used); the "
+        "cumulant at criticality is universal within a class for a given geometry and boundary "
+        "conditions: V. Privman and M. E. Fisher, \"Universal critical amplitudes in "
+        "finite-size scaling\", Phys. Rev. B 30, 322 (1984); K. Binder, \"Finite size scaling "
+        "analysis of Ising model block distribution functions\", Z. Phys. B 43, 119 (1981); the "
+        "majority-vote model is in the 2D Ising class: M. J. de Oliveira, J. Stat. Phys. 66, "
+        "273 (1992); U. Yu, Phys. Rev. E 95, 012101 (2017)"),
+    "majority_stripes": (
+        "K. Barros, P. L. Krapivsky and S. Redner, \"Freezing into stripe states in "
+        "two-dimensional ferromagnets and crossing probabilities in critical percolation\", "
+        "Phys. Rev. E 80, 040101(R) (2009): after a quench to T = 0 the periodic square L x L "
+        "system freezes into horizontal or vertical stripes with the probability P_01 + P_10 = "
+        "0.3388... that critical continuum percolation on the square torus has a cluster winding "
+        "(0, 1) or (1, 0); diagonal (1, +-1) windings reach the ground state on a much longer "
+        "time scale; H. T. Pinson, \"Critical percolation on the torus\", J. Stat. Phys. 75, 1167 "
+        "(1994) (the crossing probabilities, Eqs. (6)-(7) of BKR, evaluated in "
+        "theory.torus_wrapping_probability); J. Olejarz, P. L. Krapivsky and S. Redner, \"Fate "
+        "of 2D kinetic ferromagnets and critical percolation crossing probabilities\", Phys. Rev. "
+        "Lett. 109, 195702 (2012) (Glauber dynamics with zero-field spins flipped with "
+        "probability 1/2; Table I: stripes 0.3388, diagonal stripes 0.04196; diagonal stripes "
+        "decay to the ground state on a time scale ~ L^3); V. Spirin, P. L. Krapivsky and "
+        "S. Redner, Phys. Rev. E 63, 036118 (2001) and Phys. Rev. E 65, 016119 (2002) (the "
+        "dynamics: zero-field spins flip with probability 1/2, one flip attempt per spin per unit "
+        "time; stripe probability ~ 1/3). The start is BKR's quench from T = infinity: "
+        "independent +-1 spins with P(+1) = 1/2"),
+    "majority_coarsening": (
+        "I. M. Lifshitz, Sov. Phys. JETP 15, 939 (1962); S. M. Allen and J. W. Cahn, \"A "
+        "microscopic theory for antiphase boundary motion and its application to antiphase "
+        "domain coarsening\", Acta Metall. 27, 1085 (1979); A. J. Bray, \"Theory of phase-"
+        "ordering kinetics\", Adv. Phys. 43, 357 (1994): curvature-driven coarsening with a "
+        "non-conserved order parameter, characteristic length l(t) ~ t^(1/2); the excess energy "
+        "per bond (at T = 0 the density rho of unsatisfied bonds) scales as 1/l, so l = 1/rho; "
+        "D. A. Huse, \"Corrections to late-stage behavior in spinodal decomposition: Lifshitz-"
+        "Slyozov scaling and Monte Carlo simulations\", Phys. Rev. B 34, 7845 (1986) (the leading "
+        "correction to a domain-growth law is an additive lattice-scale constant, l = A t^b + c); "
+        "V. Spirin, P. L. Krapivsky and S. Redner, Phys. Rev. E 63, 036118 (2001) (zero-"
+        "temperature Glauber dynamics in 2D: energy density decaying as t^(-1/2))"),
+    "sznajd_complete": (
+        "derived here (theory.sznajd_complete_exit) from include/SznajdModel.hpp as implemented: "
+        "on the complete graph the first agreeing ordered pair converts every other node, so "
+        "P(+1) = n(n-1) / [n(n-1) + (N-n)(N-n-1)] exactly, -> f^2 / (f^2 + (1-f)^2); the model: "
+        "K. Sznajd-Weron and J. Sznajd, \"Opinion evolution in closed community\", Int. J. Mod. "
+        "Phys. C 11, 1157 (2000) (outflow rule: an agreeing pair converts its neighbours)"),
+    "sznajd_lattice": (
+        "D. Stauffer, A. O. Sousa and S. Moss de Oliveira, \"Generalization to square lattice of "
+        "Sznajd sociophysics model\", Int. J. Mod. Phys. C 11, 1239 (2000) (an agreeing pair of "
+        "neighbours convinces its six neighbours; the probability of ending at +1 against the "
+        "initial concentration sharpens with the lattice size into a step at 1/2); "
+        "C. Castellano, S. Fortunato and V. Loreto, \"Statistical physics of social dynamics\", "
+        "Rev. Mod. Phys. 81, 591 (2009) (review: the exit probability on the square lattice "
+        "tends to a step at m = 0); E(1/2) = 1/2 by the +-1 symmetry of the rule and of a start "
+        "with exactly half the nodes at +1"),
+    "deffuant_rate_equation": (
+        "E. Ben-Naim, P. L. Krapivsky and S. Redner, \"Bifurcations and patterns in compromise "
+        "processes\", Physica D 183, 190 (2003) (arXiv:cond-mat/0212313): rate equation of the "
+        "compromise (Deffuant) model with mu = 1/2, random pairs, |x1 - x2| < 1, opinions uniform "
+        "on [-Delta, Delta] (Delta = 1/(2 eps) for opinions on [0, 1] with bound eps); one central "
+        "cluster for Delta < 1.871, the central cluster splits into two major clusters at "
+        "Delta = 1.871; bifurcation points (Delta_1, Delta_2, Delta_3) = (1.000, 1.871, 2.248), "
+        "(3.289, 4.079, 4.455), (5.496, 6.259, 6.638), (7.676, 8.431, 8.810) (types: 1 minor pair "
+        "born, 2 central cluster -> major pair, 3 central cluster born), period L ~ 2.155; major "
+        "clusters of mass M > 1 (-> L), minor clusters of mass m < 1e-2 (-> 3e-4), integration "
+        "mesh 0.0025 in Delta; complete consensus (no minor clusters) only for Delta < 1 "
+        "(eps > 1/2); S. Fortunato, \"Universality of the threshold for complete consensus for "
+        "the opinion dynamics of Deffuant et al.\", Int. J. Mod. Phys. C 15, 1301 (2004) "
+        "(arXiv:cond-mat/0406054) (all agents in one cluster for eps > 1/2 on every graph "
+        "studied); J. Lorenz, \"Continuous opinion dynamics under bounded confidence: a "
+        "survey\", Int. J. Mod. Phys. C 18, 1819 (2007) (arXiv:0707.1762) (the consensus "
+        "transition as the bifurcation of the central cluster into two major clusters, minor "
+        "clusters neglected)"),
+    "hk_threshold": (
+        "S. Fortunato, \"On the consensus threshold for the opinion dynamics of "
+        "Krause-Hegselmann\", Int. J. Mod. Phys. C 16, 259 (2005) (arXiv:cond-mat/0408648): "
+        "complete graph, opinions uniform on [0, 1], agents updated one at a time in ordered "
+        "sweeps (every agent once per sweep, the same order every sweep; random updating, he "
+        "writes, would not change the final number of opinion clusters, though on special "
+        "graphs it can change the probability of complete consensus), stop when no opinion "
+        "changes by more than 1e-9 in a sweep, "
+        "consensus = every "
+        "agent with the same opinion (within 1e-9), 1000 samples per point at N = 5000 and "
+        "10000: the step of the consensus probability for N -> infinity lies in [0.195, 0.202] "
+        "(no comparison with synchronous updating); J. Lorenz, Int. J. "
+        "Mod. Phys. C 18, 1819 (2007) (synchronous density-based model: consensus for eps >= "
+        "0.19, with long convergence and consensus again at lower eps)"),
+    "hk_clusters": (
+        "V. D. Blondel, J. M. Hendrickx and J. N. Tsitsiklis, \"On Krause's multi-agent "
+        "consensus model with state-dependent connectivity\", IEEE Trans. Autom. Control 54, "
+        "2586 (2009) (arXiv:0807.2028): synchronous Hegselmann-Krause dynamics, bound 1, 5000 L "
+        "agents on [0, L]: the number of clusters grows linearly with L with a coefficient "
+        "slightly smaller than 1/2 (inter-cluster distance slightly larger than 2; about 2.2 on "
+        "a semi-infinite interval) -- the \"2R conjecture\" (clusters ~ 1/(2 eps) on [0, 1]); "
+        "C. Wang, Q. Li, W. E and B. Chazelle, \"Noisy Hegselmann-Krause systems: phase "
+        "transition and the 2R-conjecture\", J. Stat. Phys. 166, 1209 (2017) "
+        "(arXiv:1511.02975) (mean-field linear stability: 1/(2.29 eps) clusters)"),
 }
 
 

@@ -89,10 +89,10 @@ def test_size_grids_have_no_multipoint_coincidences():
     collapse settles on such coincidences; validation/models/_critical.py)."""
     from itertools import combinations
 
-    from validation.models import ising, potts
+    from validation.models import ising, majorityvote, potts
     from validation.models._critical import OFFSET, size_grid
 
-    for model in (ising.MODEL, potts.MODEL):
+    for model in (ising.MODEL, potts.MODEL, majorityvote.MODEL):
         exact = model.grid if model.exact_x is None else model.exact_x
         for stats in model.scales.values():
             grids = []
@@ -138,13 +138,13 @@ def test_campaign_fit_rule():
     models no notes justifying a choice."""
     import dataclasses
 
-    from validation.models import ising, potts
+    from validation.models import ising, majorityvote, potts
     from validation.models._critical import Model, Stats
 
     names = {f.name for f in dataclasses.fields(Stats)}
     assert not names & {"fit_from", "collapse_from"}
     assert not {f.name for f in dataclasses.fields(Model)} & {"fit_note", "collapse_note"}
-    for model in (ising.MODEL, potts.MODEL):
+    for model in (ising.MODEL, potts.MODEL, majorityvote.MODEL):
         for stats in model.scales.values():
             assert stats.fit_from == sorted(stats.sizes)[1]
 

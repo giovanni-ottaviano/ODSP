@@ -105,6 +105,24 @@ what changed and re-analyses.
    | `max_array_size` | optional, default 1000: at most this many jobs per array script; keep it below the cluster's `MaxArraySize` (`scontrol show config \| grep MaxArraySize`, 1001 by default) |
    | `setup`          | one shell line run before the job, e.g. `module load gcc` |
 
+   `time` is one limit for every array, so it must cover the longest job of the scale. A
+   job that hits it is killed and run again from the start by the next `slurm` call (jobs
+   do not checkpoint). At full scale the longest jobs are the finite-size-scaling points at
+   the largest size, 16 chains on 8 threads (two rounds of chains), estimated at 2e7
+   single-site updates per second per thread: majority vote L = 256 about 11 h, Ising
+   L = 256 about 5.5 h, Potts L = 192 about 4.2 h. The zero-temperature majority-rule stripe
+   blocks at L = 256 (20 replicas on 2 threads) usually take 20-60 min, but a replica caught in
+   a long-lived diagonal stripe (decay time ~ 0.06 L^3 sweeps, about 55 min at L = 256) runs
+   alone: the slowest of the ~400 such replicas is expected near 5.5 h, and a replica that runs
+   to the step cap (1.23e7 sweeps, chosen so that fewer than 0.01 replicas of the whole run are
+   expected to reach it) takes about 11.2 h, the worst case of that job. If such a job is killed
+   by the time limit, it would time out again with the same seed: run its line from
+   `jobs_t2.txt` by hand without a limit, or lower the cap (`TAU_DIAG` or `CAPPED_EXPECTED` in
+   `validation/models/majority.py`) and run `slurm` again, which reruns that whole size (a capped replica counts
+   as not frozen in stripes and is reported in the row). Every other job takes under 1 h. Ask for
+   at least 24 h (twice the longest) on dedicated nodes, and up to 55 h (five times) on
+   shared or virtualised nodes: slowdowns of up to 5x were seen on a local virtual machine.
+
 3. Write the arrays and submit every script it lists:
 
    ```

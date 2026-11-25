@@ -80,7 +80,7 @@ MODEL = Model(
     scales={
         "smoke": Stats(sizes=(8, 12, 16, 24), chains=8, n_eff=1000, burn_tau=30, threads=1),
         "small": Stats(sizes=(8, 16, 32, 64), chains=8, n_eff=500, burn_tau=30, threads=2),
-        "full": Stats(sizes=(16, 32, 64, 128, 256), chains=10, n_eff=1200, burn_tau=30,
+        "full": Stats(sizes=(16, 32, 64, 128, 256), chains=16, n_eff=1200, burn_tau=30,
                       threads=8),
     },
     seed=8100,
@@ -99,7 +99,7 @@ MODEL = Model(
 EXACT = {
     "smoke": (16, 4, 300, 300, 2, 1),
     "small": (64, 8, 2000, 1000, 5, 2),
-    "full": (256, 10, 5000, 4000, 10, 4),
+    "full": (256, 16, 5000, 4000, 10, 4),
 }
 ENERGY_T = (1.5, 1.7, 1.9, 2.0, 2.1, 2.5, 2.7, 3.0, 3.25, 3.5)
 # Why the energy leaves out 2.1 < T < 2.5 (module doc), quoted in its row.

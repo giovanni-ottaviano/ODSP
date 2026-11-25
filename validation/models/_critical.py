@@ -1,5 +1,8 @@
 """Finite-size scaling of a 2D critical point from stationary temperature sweeps, shared by
-validation/models/ising.py and potts.py (a leading underscore: not a model module itself).
+validation/models/ising.py, potts.py and majorityvote.py (a leading underscore: not a model
+module itself). The control parameter is the temperature unless the model names another
+(Model.control: the majority-vote noise q); "T" below stands for it, and the ordered phase
+is on its low side for every model here.
 
 Runs: one stationary sweep per lattice size L (--dims LxL --sweep temperature=...), each split
 into one job per temperature. The temperatures of size L are T_c + x L^(-1/nu) for one list
@@ -140,6 +143,17 @@ class Model:
     # |x|(T_c), ...), the others offset and used by the collapse; None: all exact, no
     # collapse.
     exact_x: tuple[float, ...] | None = None
+    control: str = "temperature"    # the swept odsp parameter
+    control_label: str = "T"        # its symbol in rows and figures
+    # The uncertainty of tc: 0 for an exact critical point; for a measured one (majority vote)
+    # it is the predicted error of <name>.tc, and its effect on the exponents read at tc goes
+    # into their warnings (critical_point_shift).
+    tc_error: float = 0.0
+
+    @property
+    def tc_kind(self) -> str:
+        """"exact" or "cited" (a measured critical point), as the rows call tc."""
+        return "exact" if self.tc_error == 0 else "cited"
 
 
 def tau_of(model: Model, L: int) -> float:
@@ -169,7 +183,7 @@ def fss_runs(model: Model, scale: str) -> list[Run]:
         args = model.args + ("--dims", f"{L}x{L}", "--task", "stationary", "--observable",
                              model.observable, "--burn-in", str(burn), "--samples", str(samples),
                              "--interval", str(interval), "--replicas", str(s.chains),
-                             "--sweep", "temperature=" + ",".join(f"{T:.12g}" for T in temps))
+                             "--sweep", f"{model.control}=" + ",".join(f"{T:.12g}" for T in temps))
         out.append(Run(run_name(L), args, seed=model.seed + L, threads=s.threads))
     return out
 
@@ -315,19 +329,23 @@ def read(model: Model, scale: str, data: Path) -> Data:
                 caveats)
 
 
-def _curves_axes(ax, curves: list[SizeCurve], ylabel: str, tc: float) -> None:
+def _curves_axes(ax, curves: list[SizeCurve], ylabel: str, m: Model) -> None:
     for i, c in enumerate(curves):
         ax.errorbar(c.x, c.y, yerr=c.yerr, fmt="o-", ms=3, lw=0.8, color=color(i), capsize=0,
                     label=f"L = {c.size:g}")
-    ax.axvline(tc, color="#555555", lw=1, ls="--", label=f"exact T_c = {tc:.6f}")
-    ax.set(xlabel="T", ylabel=ylabel)
+    c = m.control_label
+    ax.axvline(m.tc, color="#555555", lw=1, ls="--", label=f"{m.tc_kind} {c}_c = {m.tc:.6g}")
+    ax.set(xlabel=c, ylabel=ylabel)
     ax.legend(fontsize=6.5)
 
 
-def crossing_checks(d: Data, figures: Path, binder_target=None) -> tuple[list[Check], float]:
-    """<name>.tc (and <name>.binder when `binder_target` = (U*, error, source) is given):
-    the Binder crossing of the two largest sizes. Returns the checks and the crossing T."""
+def crossing_checks(d: Data, figures: Path, binder_target=None,
+                    binder_note: str = "") -> tuple[list[Check], float]:
+    """<name>.tc (<name>.qc for the noise q; and <name>.binder when `binder_target` = (U*,
+    error, source) is given, with `binder_note` in its warnings): the Binder crossing of the
+    two largest sizes. Returns the checks and the crossing T."""
     m = d.model
+    sym = m.control_label
     curves = d.binder
     pairs = [(curves[i], curves[i + 1]) for i in range(len(curves) - 1)]
     # Each pair's crossing (nearest the previous pair's, starting from the centre of the
@@ -343,7 +361,7 @@ def crossing_checks(d: Data, figures: Path, binder_target=None) -> tuple[list[Ch
     a, b = pairs[-1]
     if not best.found or not math.isfinite(best.err):
         raise RuntimeError(f"{m.name}: the Binder curves of L = {a.size:g} and {b.size:g} do "
-                           "not cross (with an error) inside the scanned temperatures")
+                           f"not cross (with an error) inside the scanned {m.control} range")
     warns: list[str] = []
     # how often the two largest cross (where they cross does not depend on the bootstrap)
     n_pair = sum(1 for c in find_crossings([a, b], n_boot=2, seed=0) if c.found)
@@ -351,7 +369,7 @@ def crossing_checks(d: Data, figures: Path, binder_target=None) -> tuple[list[Ch
         warns.append(f"L = {a.size:g}/{b.size:g} curves cross {n_pair} times; the crossing "
                      "nearest the previous pair's is used")
     warns += best.warnings
-    drift = "; ".join(f"{c.size_a:g}/{c.size_b:g}: " + (f"T = {c.x:.5f} ± {c.err:.2g}, "
+    drift = "; ".join(f"{c.size_a:g}/{c.size_b:g}: " + (f"{sym} = {c.x:.5f} ± {c.err:.2g}, "
                                                         f"U = {c.y:.4f} ± {e:.2g}" if c.found
                                                         else "none")
                       for c, e in rows)
@@ -364,7 +382,7 @@ def crossing_checks(d: Data, figures: Path, binder_target=None) -> tuple[list[Ch
     def figure(name: str, which: str, value: float, value_err: float, label: str) -> str:
         fig, axes = new_fig(1, 2)
         a0, a1 = axes[0]
-        _curves_axes(a0, curves, "Binder cumulant U", m.tc)
+        _curves_axes(a0, curves, "Binder cumulant U", m)
         a0.errorbar([best.x], [best.y], xerr=[best.err], fmt="*", ms=9, color="k", capsize=2,
                     label="crossing of the two largest")
         a0.legend(fontsize=6.5)
@@ -377,20 +395,22 @@ def crossing_checks(d: Data, figures: Path, binder_target=None) -> tuple[list[Ch
         a1.axhline(value, color=color(1), lw=1, label=label)
         if value_err > 0:
             a1.axhspan(value - value_err, value + value_err, color=color(1), alpha=0.2, lw=0)
-        a1.set(xlabel="1 / (larger L of the pair)", ylabel="T at the crossing" if which == "x"
-               else "U at the crossing")
+        a1.set(xlabel="1 / (larger L of the pair)", ylabel=f"{sym} at the crossing"
+               if which == "x" else "U at the crossing")
         a1.set_xlim(left=0)
         a1.legend(fontsize=6.5)
         finish(fig, d.tables[-1].provenance, f"{m.title}: Binder crossings")
         return save_figure(fig, figures, name)
 
-    name = f"{m.name}.tc"
+    name = f"{m.name}.{sym.lower()}c"   # ising.tc, mv.qc
     checks.append(Check(model=m.name, check=name,
-                        quantity=f"T_c from the Binder crossing of L = {a.size:g} and {b.size:g}",
-                        measured=best.x, error=best.err, predicted=m.tc, predicted_error=0.0,
-                        source=m.tc_source, sizes=d.sizes_text, statistics=statistics,
-                        warnings=list(warns),
-                        figure=figure(name, "x", m.tc, 0.0, f"exact T_c = {m.tc:.6f}")))
+                        quantity=f"{sym}_c from the Binder crossing of L = {a.size:g} and "
+                                 f"{b.size:g}",
+                        measured=best.x, error=best.err, predicted=m.tc,
+                        predicted_error=m.tc_error, source=m.tc_source, sizes=d.sizes_text,
+                        statistics=statistics, warnings=list(warns),
+                        figure=figure(name, "x", m.tc, m.tc_error,
+                                      f"{m.tc_kind} {sym}_c = {m.tc:.6g}")))
     if binder_target is not None:
         U, U_err, source = binder_target
         if not math.isfinite(y_err):
@@ -401,7 +421,7 @@ def crossing_checks(d: Data, figures: Path, binder_target=None) -> tuple[list[Ch
                                      f"of L = {a.size:g} and {b.size:g}",
                             measured=best.y, error=y_err, predicted=U, predicted_error=U_err,
                             source=source, sizes=d.sizes_text, statistics=statistics,
-                            warnings=list(warns),
+                            warnings=([binder_note] if binder_note else []) + list(warns),
                             figure=figure(name, "y", U, U_err, f"U* = {U:.5f} (L -> inf)")))
     return checks, best.x
 
@@ -444,17 +464,107 @@ def _exponent(d: Data, figures: Path, r, predicted: float, name: str, quantity: 
                           figure=save_figure(fig, figures, name))
 
 
+def critical_point_shift(sizes, values, errors, dlog_dx, delta: float, nu: float,
+                         fit_from: float) -> tuple[float, float]:
+    """The change of the power-fit exponent (over L >= fit_from) of values read at a fixed
+    scaling variable x = (T - T_c) L^(1/nu) when T_c moves by +delta and by -delta: the point
+    read then sits at x - delta L^(1/nu) of the moved T_c, so each value is carried to the
+    moved x along its own log-derivative dlog_dx = d ln y / dx at fixed L, y exp(dlog_dx
+    delta L^(1/nu)) (errors scaled alike). First order in delta; returns (b(+delta) - b,
+    b(-delta) - b)."""
+    L, y, e, d = (np.asarray(v, float) for v in (sizes, values, errors, dlog_dx))
+    rng = (fit_from, math.inf)
+    b0 = fit(L, y, e, "power", xrange=rng).params["b"]
+    out = []
+    for sign in (1.0, -1.0):
+        factor = np.exp(d * sign * delta * L ** (1.0 / nu))
+        out.append(float(fit(L, y * factor, e * factor, "power", xrange=rng).params["b"] - b0))
+    return out[0], out[1]
+
+
+def grid_neighbours(grid: Sequence[float], x: float, reach: int = 1) -> tuple[float, float]:
+    """The grid points `reach` places below and above grid point x. ValueError when x has
+    fewer than `reach` grid points on either side (no wrap-around at the ends)."""
+    i = list(grid).index(x)
+    if not reach <= i < len(grid) - reach:
+        raise ValueError(f"x = {x:g} needs {reach} grid point(s) on each side in the grid "
+                         f"{tuple(grid)}")
+    return grid[i - reach], grid[i + reach]
+
+
+def log_slope_derivative(x, U) -> float:
+    """d ln|dU/dx| / dx at the middle of 3 points x[0] < x[1] < x[2] of a curve U: the
+    chords on either side of x[1] are its slopes at their midpoints, and the difference of
+    their logs over the distance of the midpoints is the log-derivative (exact for an
+    exponential)."""
+    x, U = np.asarray(x, float), np.asarray(U, float)
+    s_lo = (U[1] - U[0]) / (x[1] - x[0])
+    s_hi = (U[2] - U[1]) / (x[2] - x[1])
+    return float((math.log(abs(s_hi)) - math.log(abs(s_lo))) / (0.5 * (x[2] - x[0])))
+
+
+def _tc_shift_text(d: Data, sizes, values, errors, dlog, how: str) -> str:
+    """The warning of an exponent read at a fixed scaling variable when tc is a measured
+    value (Model.tc_error > 0): its shift for tc +- tc_error (critical_point_shift), with
+    d ln y / dx of each size (dlog, in the order of sizes) obtained as `how` says."""
+    m = d.model
+    up, down = critical_point_shift(sizes, values, errors, dlog, m.tc_error, m.nu,
+                                    d.stats.fit_from)
+    c = m.control_label
+    return (f"uncertainty of the cited {c}_c (± {m.tc_error:.2g}) propagated: the exponent "
+            f"moves by {up:+.2g} for {c}_c + {m.tc_error:.2g} and by {down:+.2g} for "
+            f"{c}_c - {m.tc_error:.2g} (each size's value carried along its d ln y/dx, {how}); "
+            "not in the error bar")
+
+
+def _value_shift_text(d: Data, curves: list[SizeCurve], x: float, sizes, values, errors) -> str:
+    """_tc_shift_text for values read at grid point x: d ln y / dx from the two
+    neighbouring grid points."""
+    m = d.model
+    lo, hi = grid_neighbours(m.grid, x)
+    _, y_lo, _ = _at_x(curves, m, d.stats.sizes, lo)
+    _, y_hi, _ = _at_x(curves, m, d.stats.sizes, hi)
+    dlog = (np.log(y_hi) - np.log(y_lo)) / (hi - lo)
+    return _tc_shift_text(d, sizes, values, errors, dlog,
+                          f"from the grid points at x = {lo:g}, {hi:g}")
+
+
+def _slope_shift_text(d: Data, r) -> str:
+    """_tc_shift_text for the slopes of U at tc (x = 0, from the points at x = 0, +-s): their
+    d ln|dU/dx| / dx from the slopes at x = +-s, i.e. the chords from x = 0 to the grid
+    points at x = +-2s (log_slope_derivative), which the grid must hold."""
+    m = d.model
+    s_lo, s_hi = grid_neighbours(m.grid, 0.0)
+    far_lo, far_hi = 2.0 * s_lo, 2.0 * s_hi
+    if far_lo not in m.grid or far_hi not in m.grid:
+        raise ValueError(f"{m.name}: propagating the tc uncertainty into 1/nu needs the grid "
+                         f"points x = {far_lo:g}, {far_hi:g} (twice the slope points)")
+    xs = (far_lo, 0.0, far_hi)
+    read = [_at_x(d.binder, m, d.stats.sizes, x) for x in xs]
+    by_size = {int(L): log_slope_derivative(xs, [y[k] for _, y, _ in read])
+               for k, L in enumerate(read[0][0])}
+    dlog = np.array([by_size[int(L)] for L in r.x])
+    values = np.where(r.used, np.asarray(r.y, float), np.nan)
+    return _tc_shift_text(d, r.x, values, r.yerr, dlog,
+                          f"from the slopes at x = {s_lo:g}, {s_hi:g} (chords to the grid points "
+                          f"at x = {far_lo:g}, 0, {far_hi:g})")
+
+
 def exponent_checks(d: Data, figures: Path) -> list[Check]:
     """<name>.inv_nu (Binder slope at T_c), <name>.gamma_nu (chi' peak or chi' at a fixed
     scaling variable, see Model.gamma_at), <name>.beta_nu (|x| at T_c), each a power fit
-    against L."""
+    against L. With a measured T_c (Model.tc_error), the shift of each exponent for T_c +- its
+    error goes into its warnings."""
     m = d.model
+    c, kind = m.control_label, m.tc_kind
+    measured_tc = m.tc_error > 0
     out = []
     r = slope_at_crossing_vs_size(d.binder, m.tc, n_boot=N_BOOT, seed=1)
     out.append(_exponent(d, figures, r, 1.0 / m.nu, f"{m.name}.inv_nu",
-                         "1/nu from |dU/dT| at the exact T_c ~ L^(1/nu)", "|dU/dT| at T_c",
-                         m.exp_source, f"slopes through the 3 points around T_c, {N_BOOT} "
-                                       "bootstrap draws"))
+                         f"1/nu from |dU/d{c}| at the {kind} {c}_c ~ L^(1/nu)",
+                         f"|dU/d{c}| at {c}_c", m.exp_source,
+                         f"slopes through the 3 points around {c}_c, {N_BOOT} bootstrap draws",
+                         extra=[_slope_shift_text(d, r)] if measured_tc else ()))
     if m.gamma_at is None:
         r = peak_vs_size(d.chi, n_boot=N_BOOT, seed=2)
         out.append(_exponent(d, figures, r, m.gamma_nu, f"{m.name}.gamma_nu",
@@ -464,19 +574,23 @@ def exponent_checks(d: Data, figures: Path) -> list[Check]:
                              f"{N_BOOT} bootstrap draws"))
     else:
         L, y, e = _at_x(d.chi, m, d.stats.sizes, m.gamma_at)
+        extra = [m.gamma_note] if m.gamma_note else []
+        if measured_tc:
+            extra.append(_value_shift_text(d, d.chi, m.gamma_at, L, y, e))
         out.append(_exponent(d, figures, fit(L, y, e, "power"), m.gamma_nu,
                              f"{m.name}.gamma_nu",
-                             f"gamma/nu from chi' = N(<x^2> - <|x|>^2) at its broad maximum, "
-                             f"fixed (T - T_c) L^(1/nu) = {m.gamma_at:g}, ~ L^(gamma/nu)",
-                             f"chi' at (T - T_c) L^(1/nu) = {m.gamma_at:g}", m.exp_source,
-                             "values at that grid point of each size",
-                             extra=[m.gamma_note] if m.gamma_note else ()))
+                             f"gamma/nu from chi' = N(<x^2> - <|x|>^2) near its broad maximum, "
+                             f"fixed ({c} - {c}_c) L^(1/nu) = {m.gamma_at:g}, ~ L^(gamma/nu)",
+                             f"chi' at ({c} - {c}_c) L^(1/nu) = {m.gamma_at:g}", m.exp_source,
+                             "values at that grid point of each size", extra=extra))
     L, y, e = _at_x(d.order, m, d.stats.sizes)
     r = fit(L, y, e, "power")
     out.append(_exponent(d, figures, r, -m.beta_nu, f"{m.name}.beta_nu",
-                         f"-beta/nu from {m.order_label} at the exact T_c ~ L^(-beta/nu)",
-                         f"{m.order_label} at T_c", m.exp_source,
-                         "values at the T_c point of each size"))
+                         f"-beta/nu from {m.order_label} at the {kind} {c}_c ~ L^(-beta/nu)",
+                         f"{m.order_label} at {c}_c", m.exp_source,
+                         f"values at the {c}_c point of each size",
+                         extra=[_value_shift_text(d, d.order, 0.0, L, y, e)] if measured_tc
+                         else ()))
     return out
 
 
@@ -529,7 +643,7 @@ def collapse_checks(d: Data, figures: Path, xc0: float, nu0: float) -> list[Chec
     def figure(name: str) -> str:
         fig, axes = new_fig(1, 2)
         a0, a1 = axes[0]
-        _curves_axes(a0, [c for c in d.binder if c.size >= lmin], "Binder cumulant U", m.tc)
+        _curves_axes(a0, [c for c in d.binder if c.size >= lmin], "Binder cumulant U", m)
         for i, c in enumerate(curves):
             a0.plot(c.x, c.y, "o", ms=6, mfc="none", color=color(i), lw=0,
                     label="in the collapse" if i == 0 else None)

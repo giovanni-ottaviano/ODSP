@@ -58,7 +58,7 @@ MODEL = Model(
     scales={
         "smoke": Stats(sizes=(8, 12, 16, 24), chains=8, n_eff=1000, burn_tau=30, threads=1),
         "small": Stats(sizes=(6, 12, 24, 48), chains=8, n_eff=600, burn_tau=30, threads=2),
-        "full": Stats(sizes=(12, 24, 48, 96, 192), chains=10, n_eff=1500, burn_tau=30,
+        "full": Stats(sizes=(12, 24, 48, 96, 192), chains=16, n_eff=1500, burn_tau=30,
                       threads=8),
     },
     seed=8200,

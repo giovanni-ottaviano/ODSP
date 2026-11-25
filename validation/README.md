@@ -161,13 +161,15 @@ Under `results/<scale>/` (not tracked by git):
 - `<model>/<run>_*.csv`, `<model>/<run>_config.txt`: the merged runs;
 - `figures/`: one figure per check;
 - `summary.csv` (full precision: model, check, quantity, measured, error, predicted,
-  predicted_error, source, sigma, tolerance_sigma, sizes, statistics, warnings, figure) and
-  `summary.md` (the same as a table; `!` marks |σ| above the check's tolerance);
+  predicted_error, source, sigma, tolerance_sigma, one_sided, sizes, statistics, warnings,
+  figure) and `summary.md` (the same as a table; `!` marks |σ| above the check's tolerance);
 - `log.txt`: what every `run`, `slurm`, `merge` and `analyse` did, skipped or failed.
 
 σ = (measured − predicted) / hypot(error, predicted error). At full scale the table reports
 σ; at smoke and small scale it doubles as a regression check against each check's stated
-tolerance.
+tolerance. A one-sided check (`Check.one_sided = "below"`, e.g. an exponent that must be
+negative where no value is predicted) passes only when σ is below minus its tolerance and is
+marked `!` otherwise; the table says "one-sided" next to its σ.
 
 ## Adding a model
 

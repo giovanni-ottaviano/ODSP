@@ -549,3 +549,160 @@ def ising_energy(T: float) -> float:
 
 POTTS3_TC: float = 1.0 / math.log(1.0 + math.sqrt(3.0))     # self-dual point, J / ln(1 + sqrt q)
 POTTS3_EXPONENTS: dict[str, float] = {"nu": 5.0 / 6.0, "gamma/nu": 26.0 / 15.0, "beta/nu": 2.0 / 15.0}
+
+
+# ---------------------------------------------------------------------------------------------
+# Square-lattice majority-vote model (Oliveira's rule; validation/models/majorityvote.py)
+# ---------------------------------------------------------------------------------------------
+
+# Critical noise and its quoted uncertainty (Yu 2017; Oliveira 1992 gave 0.075(1)). Not exact:
+# the uncertainty is the predicted_error of mv.qc.
+MV_QC: tuple[float, float] = (0.07518, 3e-5)
+
+
+# ---------------------------------------------------------------------------------------------
+# Majority rule at T = 0 on the square torus (validation/models/majority.py)
+# ---------------------------------------------------------------------------------------------
+
+def _pinson_Z(m: float, n: float, g: float, r: float) -> float:
+    """Z_{m,n}(g; r) = sqrt(g / r) / eta(e^(-2 pi r))^2 exp(-pi g (m^2 / r + n^2 r)), eta the
+    Dedekind eta function eta(q) = q^(1/24) prod_k (1 - q^k) (Pinson 1994; BKR 2009)."""
+    q = math.exp(-2.0 * math.pi * r)
+    k = np.arange(1, 400)
+    eta = q ** (1.0 / 24.0) * float(np.prod(1.0 - q ** k))
+    return math.sqrt(g / r) / eta ** 2 * math.exp(-math.pi * g * (m * m / r + n * n * r))
+
+
+def torus_wrapping_probability(a: int, b: int, r: float = 1.0, terms: int = 30) -> float:
+    """Probability that critical continuum percolation on a torus of aspect ratio r (height /
+    width) has a spanning cluster with winding numbers (a, b) (vertical, horizontal), a and b
+    coprime: Pinson, J. Stat. Phys. 75, 1167 (1994), as Eq. (6) of Barros, Krapivsky and Redner
+    (2009),
+        P_ab = sum over l of  Z_{3al,3bl} - Z_{2al,2bl} - Z_{(3l+1)a,(3l+1)b} / 2
+                              - Z_{(3l+2)a,(3l+2)b} / 2 + Z_{(2l+1)a,(2l+1)b},
+    Z_{m,n} = Z_{m,n}(2/3; r) (_pinson_Z), l = -terms..terms (the terms fall off as
+    exp(-pi g l^2 ...)). (0, 1) and (1, 0) are the vertical and horizontal stripes, (1, +-1)
+    the diagonal ones. With torus_cross_probability these exhaust the configurations: the sum
+    of P_ab over primitive windings (up to sign) plus 2 P_X is 1."""
+    if math.gcd(abs(a), abs(b)) != 1:
+        raise ValueError("winding numbers (a, b) must be coprime")
+    if not r > 0:
+        raise ValueError("aspect ratio r must be > 0")
+    g = 2.0 / 3.0
+    total = 0.0
+    for l in range(-terms, terms + 1):
+        total += (_pinson_Z(3 * a * l, 3 * b * l, g, r) - _pinson_Z(2 * a * l, 2 * b * l, g, r)
+                  - 0.5 * _pinson_Z((3 * l + 1) * a, (3 * l + 1) * b, g, r)
+                  - 0.5 * _pinson_Z((3 * l + 2) * a, (3 * l + 2) * b, g, r)
+                  + _pinson_Z((2 * l + 1) * a, (2 * l + 1) * b, g, r))
+    return total
+
+
+def torus_cross_probability(r: float = 1.0, terms: int = 30) -> float:
+    """P_X(r): probability of the cross topology (a cluster made of spanning clusters with
+    distinct windings), equal by duality to that of no spanning cluster (Pinson 1994; BKR 2009,
+    Eq. (7)): P_X = [Z(8/3, 1; r) - Z(8/3, 1/2; r)] / 2, Z(g, f; r) = f sum_{m,n} Z_{fm,fn}(g; r)."""
+    def Zsum(g: float, f: float) -> float:
+        return f * sum(_pinson_Z(f * m, f * n, g, r)
+                       for m in range(-terms, terms + 1) for n in range(-terms, terms + 1))
+    return 0.5 * (Zsum(8.0 / 3.0, 1.0) - Zsum(8.0 / 3.0, 0.5))
+
+
+# Probability that zero-temperature Glauber dynamics on the periodic L x L square lattice from a
+# random m = 0 start freezes into horizontal or vertical stripes, L -> infinity: the crossing
+# probability P_01 + P_10 of critical continuum percolation on the square torus (Barros,
+# Krapivsky and Redner 2009: 0.3388...). Diagonal (1, +-1) windings (0.04196) are long-lived but
+# reach the ground state; cross topologies (2 P_X = 0.6191) coarsen straight to it.
+MAJORITY_STRIPE_PROBABILITY: float = torus_wrapping_probability(0, 1) + torus_wrapping_probability(1, 0)
+
+
+# ---------------------------------------------------------------------------------------------
+# Sznajd model on the complete graph (validation/models/sznajd.py)
+# ---------------------------------------------------------------------------------------------
+
+def sznajd_complete_exit(n: int, N: int) -> float:
+    """P(+1 consensus) of SznajdModel (include/SznajdModel.hpp) on the complete graph of N
+    nodes from n nodes at +1, exactly, derived here from the rule as implemented:
+      * one update draws a uniform directed edge (i, j): random_directed_edge() on a regular
+        graph is a uniform node i and a uniform neighbour j, i.e. a uniform ordered pair i != j
+        out of N (N - 1);
+      * a disagreeing pair returns without changing anything;
+      * an agreeing pair sets every neighbour of i other than j and every neighbour of j other
+        than i to its opinion: on the complete graph that is every other node, so the first
+        agreeing pair ends the run in consensus on its opinion.
+    The state does not change before the first agreeing draw, so every draw has the same
+    probabilities, n (n - 1) / [N (N - 1)] for a (+,+) pair and (N - n)(N - n - 1) / [N (N - 1)]
+    for a (-,-) one, and the first agreeing draw is (+,+) with probability
+        P(n) = n (n - 1) / [n (n - 1) + (N - n)(N - n - 1)]
+    (0 for n <= 1 and 1 for n >= N - 1, where only one kind of agreeing pair exists; N >= 3 so
+    that some pair agrees). With n = f N, P -> f^2 / (f^2 + (1 - f)^2) as N -> infinity
+    (sznajd_mean_field_exit), not a step at f = 1/2."""
+    if N < 3 or not 0 <= n <= N:
+        raise ValueError("need N >= 3 and 0 <= n <= N")
+    up, down = n * (n - 1), (N - n) * (N - n - 1)
+    return up / (up + down)
+
+
+def sznajd_mean_field_exit(f: float) -> float:
+    """The N -> infinity limit of sznajd_complete_exit at n = f N: f^2 / (f^2 + (1 - f)^2)."""
+    return f * f / (f * f + (1.0 - f) ** 2)
+
+
+# ---------------------------------------------------------------------------------------------
+# Deffuant and Hegselmann-Krause on the complete graph (validation/models/boundedconfidence.py)
+# ---------------------------------------------------------------------------------------------
+
+# Ben-Naim, Krapivsky and Redner (2003): bifurcation points (Delta_1, Delta_2, Delta_3) of the
+# rate equation in the opinion range Delta (opinions on [-Delta, Delta], bound 1), one row per
+# period; Delta = 1 / (2 eps) for opinions on [0, 1] with bound eps.
+BKR_BIFURCATIONS = ((1.000, 1.871, 2.248), (3.289, 4.079, 4.455), (5.496, 6.259, 6.638),
+                    (7.676, 8.431, 8.810))
+BKR_PERIOD = 2.155          # period of the bifurcation pattern in Delta (extrapolated by BKR)
+BKR_MESH = 0.0025           # their integration mesh in Delta
+
+
+def deffuant_major_threshold() -> tuple[float, float]:
+    """(eps*, error): the bound above which the Deffuant rate equation (mu = 1/2, complete
+    mixing, uniform start on [0, 1]) ends with ONE major cluster, eps* = 1 / (2 Delta_2(1)),
+    Delta_2(1) = 1.871 (Ben-Naim, Krapivsky and Redner 2003). Error: half their integration
+    mesh, 0.00125 in Delta, carried to eps = 1/(2 Delta): d eps = d Delta / (2 Delta^2). It
+    covers only the Delta mesh: not their opinion grid (400 states per unit of x) nor the
+    rounding of 1.871 to three decimals, which BKR do not quantify."""
+    d = BKR_BIFURCATIONS[0][1]
+    return 1.0 / (2.0 * d), 0.5 * BKR_MESH / (2.0 * d * d)
+
+
+def deffuant_even_windows() -> list[tuple[int, float, float]]:
+    """(major clusters, Delta_lo, Delta_hi) for the ranges of the BKR rate equation where the
+    final state is 2k major clusters and nothing in between but minor clusters: from the k-th
+    type-2 bifurcation (the central cluster splits into a major pair) to the next type-1
+    bifurcation. Over them the central cluster born at the type-3 point stays far below 1e-2 in
+    mass (BKR Fig. 4; its mass grows ~ (Delta - Delta_3)^4 and explodes only near the type-1
+    point), so the count does not depend on the mass cut that separates major from minor
+    clusters. Only the windows whose both ends BKR tabulate (k = 1, 2, 3): the fourth one would
+    end at Delta_1 of the fifth period, which is not in their table (ruling R21)."""
+    rows = BKR_BIFURCATIONS
+    return [(2 * (k + 1), rows[k][1], rows[k + 1][0]) for k in range(len(rows) - 1)]
+
+
+def deffuant_window_points() -> list[tuple[float, int]]:
+    """(eps, major clusters) at the centre (in Delta) of each even window: the points where
+    the BKR count is compared with the simulation, eps = 1 / (2 Delta)."""
+    return [(1.0 / (lo + hi), n) for n, lo, hi in deffuant_even_windows()]
+
+
+def deffuant_asymptotic_clusters(eps: float) -> float:
+    """BKR's large-Delta form for the number of major clusters: 2 Delta / L = 1 / (L eps)
+    (4 Delta / L clusters in all, alternating major and minor, separated by L/2)."""
+    return 1.0 / (BKR_PERIOD * eps)
+
+
+HK_THRESHOLD_INTERVAL = (0.195, 0.202)    # Fortunato (2005), complete graph, N = 5000, 10000
+
+
+def hk_threshold() -> tuple[float, float]:
+    """(eps_c, error) of Hegselmann-Krause on the complete graph: the midpoint of Fortunato's
+    interval [0.195, 0.202] and the standard deviation of a uniform law on it (half-width /
+    sqrt(3))."""
+    lo, hi = HK_THRESHOLD_INTERVAL
+    return 0.5 * (lo + hi), 0.5 * (hi - lo) / math.sqrt(3.0)

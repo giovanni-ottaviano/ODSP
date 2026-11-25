@@ -56,6 +56,23 @@ class Check:
     warnings: list[str] = field(default_factory=list)
     figure: str | None = None
     tolerance_sigma: float = 3.0   # regression tolerance at smoke/small scale
+    # None: a two-sided check (flagged when |sigma| > tolerance). "below": a one-sided check
+    # of an inequality, measured < predicted, passed only when sigma < -tolerance (flagged
+    # otherwise), e.g. an exponent that must be negative when no value is predicted. Under
+    # R16 (Task 13) one-sided rows go to a separate qualitative block of the table.
+    one_sided: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.one_sided not in (None, "below"):
+            raise ValueError(f"{self.check}: one_sided must be None or 'below', got {self.one_sided!r}")
+
+    @property
+    def flagged(self) -> bool:
+        """Beyond the tolerance: |sigma| > tolerance_sigma, or for a one-sided check not
+        significantly below the prediction (sigma >= -tolerance_sigma)."""
+        if self.one_sided == "below":
+            return not self.sigma < -self.tolerance_sigma
+        return abs(self.sigma) > self.tolerance_sigma
 
     @property
     def sigma(self) -> float:

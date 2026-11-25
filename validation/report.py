@@ -10,7 +10,8 @@ from pathlib import Path
 from .core import Check
 
 COLUMNS = ("model", "check", "quantity", "measured", "error", "predicted", "predicted_error",
-           "source", "sigma", "tolerance_sigma", "sizes", "statistics", "warnings", "figure")
+           "source", "sigma", "tolerance_sigma", "one_sided", "sizes", "statistics", "warnings",
+           "figure")
 
 
 def _num(x: float) -> str:
@@ -33,7 +34,8 @@ def _cell(text: str) -> str:
 def write_summary(checks: Sequence[Check], out_dir: Path) -> None:
     """Write summary.csv (full precision, the columns of COLUMNS; warnings joined by '; ')
     and summary.md (measured ± error, predicted ± error, σ to two decimals, and '!' after σ
-    when |σ| exceeds the check's tolerance) into `out_dir`."""
+    when the check is flagged: |σ| beyond its tolerance, or a one-sided check not significantly
+    below its prediction; one-sided rows say so next to σ) into `out_dir`."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "summary.csv", "w", newline="", encoding="utf-8") as f:
@@ -42,7 +44,8 @@ def write_summary(checks: Sequence[Check], out_dir: Path) -> None:
         for c in checks:
             w.writerow([c.model, c.check, c.quantity, _num(c.measured), _num(c.error),
                         _num(c.predicted), _num(c.predicted_error), c.source, _num(c.sigma),
-                        _num(c.tolerance_sigma), c.sizes, c.statistics, "; ".join(c.warnings),
+                        _num(c.tolerance_sigma), c.one_sided or "", c.sizes, c.statistics,
+                        "; ".join(c.warnings),
                         c.figure or ""])
     head = ("model", "check", "quantity", "measured", "predicted", "source", "σ", "sizes",
             "statistics", "warnings")
@@ -51,12 +54,15 @@ def write_summary(checks: Sequence[Check], out_dir: Path) -> None:
         predicted = _short(c.predicted)
         if c.predicted_error:
             predicted += f" ± {_short(c.predicted_error, 2)}"
-        sigma = f"{c.sigma:+.2f}" + (" !" if abs(c.sigma) > c.tolerance_sigma else "")
+        sigma = f"{c.sigma:+.2f}" + (f" (one-sided: passes below -{c.tolerance_sigma:g})"
+                                      if c.one_sided else "") + (" !" if c.flagged else "")
         row = (c.model, c.check, c.quantity, f"{_short(c.measured)} ± {_short(c.error, 2)}",
                predicted, c.source, sigma, c.sizes, c.statistics, "; ".join(c.warnings) or "-")
         lines.append("| " + " | ".join(_cell(v) for v in row) + " |")
     text = ["# Validation summary", "",
             f"{len(checks)} check(s). σ = (measured − predicted) / hypot(error, predicted error); "
             "'!' marks |σ| above the check's tolerance (a regression flag at smoke and small "
-            "scale, see summary.csv for the tolerances).", ""] + lines
+            "scale, see summary.csv for the tolerances); a one-sided check (an inequality, e.g. "
+            "an exponent that must be negative) passes only when σ is below minus its tolerance "
+            "and is marked '!' otherwise.", ""] + lines
     (out_dir / "summary.md").write_text("\n".join(text) + "\n", encoding="utf-8")

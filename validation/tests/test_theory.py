@@ -265,3 +265,90 @@ def test_every_citation_key_is_used_or_documented():
     for path in sorted((ROOT / "validation" / "models").glob("*.py")):
         missing = _referenced_citation_keys(path) - CITATIONS.keys()
         assert not missing, f"{path.name} cites unknown keys {sorted(missing)}"
+
+
+def _sznajd_complete_brute_force(N: int, n: int, trials: int, rng: np.random.Generator) -> float:
+    """SznajdModel's _single_update on the complete graph, as implemented: a uniform directed
+    edge (i, j), i != j (a uniform node, then a uniform one of its N - 1 neighbours); if both
+    hold the same opinion, every neighbour of i other than j and every neighbour of j other
+    than i adopts it; otherwise nothing happens. Repeated until consensus; the fraction of
+    trials ending at +1."""
+    up = 0
+    for _ in range(trials):
+        s = np.array([1] * n + [-1] * (N - n))
+        while abs(s.sum()) != N:
+            i = rng.integers(N)
+            j = rng.integers(N - 1)
+            j += j >= i
+            if s[i] == s[j]:
+                s[:] = s[i]
+        up += s[0] == 1
+    return up / trials
+
+
+def test_sznajd_complete_exit():
+    N = 7
+    P = [theory.sznajd_complete_exit(n, N) for n in range(N + 1)]
+    # first agreeing draw decides: P(+) = n(n-1) / [n(n-1) + (N-n)(N-n-1)]
+    for n in range(2, N - 1):
+        assert P[n] == approx(n * (n - 1) / (n * (n - 1) + (N - n) * (N - n - 1)), abs=1e-15)
+    assert P[0] == 0.0 and P[1] == 0.0 and P[N - 1] == 1.0 and P[N] == 1.0
+    assert theory.sznajd_complete_exit(3, 6) == approx(0.5, abs=1e-15)        # symmetric start
+    # against a brute-force simulation of the rule as implemented (4 sigma, fixed seed)
+    rng = np.random.default_rng(20261122)
+    trials = 4000
+    for n in (2, 3, 4, 5):
+        sim = _sznajd_complete_brute_force(N, n, trials, rng)
+        assert abs(sim - P[n]) < 4 * math.sqrt(P[n] * (1 - P[n]) / trials) + 1e-12, (n, sim, P[n])
+    # large-N limit f^2 / (f^2 + (1-f)^2)
+    for f in (0.2, 0.45, 0.7):
+        lim = f * f / (f * f + (1 - f) ** 2)
+        assert theory.sznajd_mean_field_exit(f) == approx(lim, abs=1e-15)
+        assert theory.sznajd_complete_exit(int(f * 10 ** 6), 10 ** 6) == approx(lim, abs=2e-6)
+    with pytest.raises(ValueError):
+        theory.sznajd_complete_exit(3, 2)
+    assert "sznajd_complete" in CITATIONS and "derived here" in CITATIONS["sznajd_complete"]
+
+
+def test_torus_wrapping_probabilities():
+    # Pinson (1994), Eq. (6) of Barros-Krapivsky-Redner (2009): every percolation configuration
+    # on the torus has exactly one of: a cluster with primitive winding (a, b) (up to sign), the
+    # cross topology (probability P_X), or no spanning cluster (also P_X, by duality)
+    for r in (1.0, 0.5, 0.8):
+        total = 2 * theory.torus_cross_probability(r)
+        for a in range(0, 12):
+            for b in range(-12, 13):
+                if math.gcd(a, abs(b)) == 1 and not (a == 0 and b < 0):
+                    total += theory.torus_wrapping_probability(a, b, r)
+        assert total == approx(1.0, abs=1e-12), r
+    p01 = theory.torus_wrapping_probability(0, 1, 1.0)
+    assert p01 == approx(theory.torus_wrapping_probability(1, 0, 1.0), abs=1e-15)   # square
+    # exact: R^(1)(p_c) = 0.169415435 (Newman & Ziff, Phys. Rev. E 64, 016706 (2001)), the
+    # probability of a cluster wrapping one way but not the other; BKR's 0.3388 = 2 R^(1)
+    assert p01 == approx(0.169415435, abs=1e-9)
+    # BKR: the probability to freeze into a horizontal or vertical stripe on the square torus is
+    # 0.3388...; Olejarz-Krapivsky-Redner (2012), Table I: diagonal (1, +-1) 0.04196
+    assert theory.MAJORITY_STRIPE_PROBABILITY == approx(2 * p01, abs=1e-15)
+    assert f"{theory.MAJORITY_STRIPE_PROBABILITY:.4f}" == "0.3388"
+    diag = theory.torus_wrapping_probability(1, 1, 1.0) + theory.torus_wrapping_probability(1, -1, 1.0)
+    assert f"{diag:.5f}" == "0.04196"
+    assert "majority_stripes" in CITATIONS and "040101" in CITATIONS["majority_stripes"]
+    assert "majority_coarsening" in CITATIONS
+
+
+def test_bounded_confidence_constants():
+    eps, err = theory.deffuant_major_threshold()
+    assert eps == approx(1 / 3.742) and eps == approx(0.26724, abs=1e-5)
+    assert err == approx(0.00125 / (2 * 1.871 ** 2))             # half the BKR mesh, in eps
+    win = theory.deffuant_even_windows()
+    # from a type-2 point to the next type-1 point, both tabulated by BKR (R21: no window
+    # whose end is extrapolated by a period)
+    assert [w[0] for w in win] == [2, 4, 6]
+    assert [w[1] for w in win] == [1.871, 4.079, 6.259]
+    assert [w[2] for w in win] == [3.289, 5.496, 7.676]
+    for (eps_k, n), (_, lo, hi) in zip(theory.deffuant_window_points(), win):
+        assert lo < 1 / (2 * eps_k) < hi and abs(1 / (2 * eps_k) - (lo + hi) / 2) < 1e-12
+        # BKR's asymptotic count 1/(L eps) is within one cluster of the window's count
+        assert abs(theory.deffuant_asymptotic_clusters(eps_k) - n) < 1
+    c, e = theory.hk_threshold()
+    assert c == approx(0.1985) and e == approx(0.0035 / math.sqrt(3))

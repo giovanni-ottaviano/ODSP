@@ -161,9 +161,10 @@ class Campaign:
                               encoding="utf-8")
             self.log("analyse", f"analysed {p.model}: {len(checks)} check(s)")
             for c in checks:
-                if abs(c.sigma) > c.tolerance_sigma:
-                    self.log("analyse", f"  {c.check}: sigma = {c.sigma:+.2f} beyond the tolerance "
-                                        f"{c.tolerance_sigma:g}")
+                if c.flagged:
+                    what = (f"not below -{c.tolerance_sigma:g} (one-sided check)" if c.one_sided
+                            else f"beyond the tolerance {c.tolerance_sigma:g}")
+                    self.log("analyse", f"  {c.check}: sigma = {c.sigma:+.2f} {what}")
         checks = self.stored_checks()
         write_summary(checks, self.scale_root)
         self.log("analyse", f"summary: {len(checks)} check(s) -> {self.scale_root / 'summary.csv'}, "

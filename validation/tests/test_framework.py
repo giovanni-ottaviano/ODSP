@@ -276,3 +276,23 @@ def test_summary_sigma(tmp_path):
     assert len(rows) == 1 and float(rows[0]["sigma"]) == pytest.approx(2.0)
     table = [l for l in (tmp_path / "summary.md").read_text().splitlines() if l.startswith("|")]
     assert len(table) == 3             # header, separator, one row
+
+
+def test_one_sided_checks(tmp_path):
+    def chk(measured, one_sided):
+        return Check(model="m", check=f"m.{one_sided}{measured}", quantity="b", measured=measured,
+                     error=0.1, predicted=0.0, predicted_error=0.0, source="src", sizes="L=8",
+                     statistics="-", one_sided=one_sided)
+    passed, failed, two = chk(-0.8, "below"), chk(0.1, "below"), chk(-0.8, None)
+    assert not passed.flagged and failed.flagged and two.flagged     # sigma -8, +1, -8
+    assert chk(-0.25, "below").flagged                               # sigma -2.5: not significant
+    with pytest.raises(ValueError):
+        chk(0.0, "above")
+    write_summary([passed, failed, two], tmp_path)
+    rows = {r["check"]: r for r in summary_rows(tmp_path)}
+    assert rows[passed.check]["one_sided"] == "below" and rows[two.check]["one_sided"] == ""
+    md = {l.split("|")[2].strip(): l for l in (tmp_path / "summary.md").read_text().splitlines()
+          if l.startswith("| m |")}
+    assert "one-sided" in md[passed.check] and " !" not in md[passed.check]
+    assert "one-sided" in md[failed.check] and " !" in md[failed.check]
+    assert "one-sided" not in md[two.check] and " !" in md[two.check]
